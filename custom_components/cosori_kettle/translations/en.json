@@ -1,0 +1,38 @@
+{
+  "config": {
+    "step": {
+      "bluetooth_confirm": {
+        "description": "Do you want to add the Cosori Kettle {name} to Home Assistant?"
+      },
+      "user": {
+        "data": {
+          "address": "Device"
+        },
+        "description": "Select your Cosori Kettle from the list of discovered devices."
+      }
+    },
+    "abort": {
+      "already_configured": "Device is already configured",
+      "no_devices_found": "No Cosori Kettles found. Make sure your kettle is powered on and within Bluetooth range.",
+      "not_supported": "This device is not a supported Cosori Kettle"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "current_temperature": {
+        "name": "Current Temperature"
+      },
+      "target_temperature": {
+        "name": "Target Temperature"
+      }
+    },
+    "binary_sensor": {
+      "on_base": {
+        "name": "On Base"
+      },
+      "heating": {
+        "name": "Heating"
+      }
+    }
+  }
+}

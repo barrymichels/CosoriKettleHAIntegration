@@ -1,0 +1,157 @@
+# Example Lovelace dashboard configuration for Cosori Kettle
+
+# Simple thermostat card
+type: thermostat
+entity: water_heater.cosori_kettle
+name: Cosori Kettle
+
+---
+
+# Detailed dashboard with all entities
+type: vertical-stack
+cards:
+  # Main control card
+  - type: thermostat
+    entity: water_heater.cosori_kettle
+    name: Cosori Kettle
+
+  # Status entities
+  - type: entities
+    title: Status
+    entities:
+      - entity: sensor.cosori_kettle_current_temperature
+        name: Current Temperature
+      - entity: sensor.cosori_kettle_target_temperature
+        name: Target Temperature
+      - entity: binary_sensor.cosori_kettle_on_base
+        name: On Base
+      - entity: binary_sensor.cosori_kettle_heating
+        name: Heating
+
+---
+
+# Compact glance card
+type: glance
+title: Kettle Status
+entities:
+  - entity: sensor.cosori_kettle_current_temperature
+    name: Current
+  - entity: binary_sensor.cosori_kettle_on_base
+    name: On Base
+  - entity: binary_sensor.cosori_kettle_heating
+    name: Heating
+
+---
+
+# Button card for quick actions (requires custom:button-card from HACS)
+type: custom:button-card
+entity: water_heater.cosori_kettle
+name: Quick Boil
+icon: mdi:kettle
+tap_action:
+  action: call-service
+  service: water_heater.set_temperature
+  service_data:
+    entity_id: water_heater.cosori_kettle
+    temperature: 100
+    operation_mode: "on"
+styles:
+  card:
+    - height: 100px
+  icon:
+    - width: 50px
+    - color: |
+        [[[
+          if (states['binary_sensor.cosori_kettle_heating'].state === 'on') return 'orange';
+          return 'var(--primary-color)';
+        ]]]
+
+---
+
+# Temperature preset buttons
+type: horizontal-stack
+cards:
+  - type: button
+    name: Green Tea
+    icon: mdi:tea
+    tap_action:
+      action: call-service
+      service: water_heater.set_temperature
+      service_data:
+        entity_id: water_heater.cosori_kettle
+        temperature: 80
+        operation_mode: "on"
+
+  - type: button
+    name: Black Tea
+    icon: mdi:tea
+    tap_action:
+      action: call-service
+      service: water_heater.set_temperature
+      service_data:
+        entity_id: water_heater.cosori_kettle
+        temperature: 95
+        operation_mode: "on"
+
+  - type: button
+    name: Boil
+    icon: mdi:kettle
+    tap_action:
+      action: call-service
+      service: water_heater.set_temperature
+      service_data:
+        entity_id: water_heater.cosori_kettle
+        temperature: 100
+        operation_mode: "on"
+
+---
+
+# Advanced card with conditional elements (requires card-mod)
+type: entities
+title: Cosori Kettle
+entities:
+  - type: custom:slider-entity-row
+    entity: water_heater.cosori_kettle
+    name: Target Temperature
+    min: 40
+    max: 100
+    step: 5
+
+  - entity: sensor.cosori_kettle_current_temperature
+    name: Current Temperature
+    icon: mdi:thermometer
+
+  - type: conditional
+    conditions:
+      - entity: binary_sensor.cosori_kettle_on_base
+        state: "off"
+    row:
+      entity: binary_sensor.cosori_kettle_on_base
+      name: Kettle is off base
+      icon: mdi:alert
+
+  - type: conditional
+    conditions:
+      - entity: binary_sensor.cosori_kettle_heating
+        state: "on"
+    row:
+      entity: binary_sensor.cosori_kettle_heating
+      name: Currently heating
+      icon: mdi:fire
+
+  - type: buttons
+    entities:
+      - entity: water_heater.cosori_kettle
+        name: Turn On
+        tap_action:
+          action: call-service
+          service: water_heater.turn_on
+          service_data:
+            entity_id: water_heater.cosori_kettle
+      - entity: water_heater.cosori_kettle
+        name: Turn Off
+        tap_action:
+          action: call-service
+          service: water_heater.turn_off
+          service_data:
+            entity_id: water_heater.cosori_kettle

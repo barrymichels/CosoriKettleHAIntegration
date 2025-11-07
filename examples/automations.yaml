@@ -1,0 +1,193 @@
+# Example automations for Cosori Kettle Home Assistant Integration
+
+# Morning coffee - heat to boiling at 7 AM
+- alias: "Morning Coffee"
+  description: "Heat kettle to boiling temperature for morning coffee"
+  trigger:
+    - platform: time
+      at: "07:00:00"
+  condition:
+    - condition: state
+      entity_id: binary_sensor.cosori_kettle_on_base
+      state: "on"
+  action:
+    - service: water_heater.set_temperature
+      target:
+        entity_id: water_heater.cosori_kettle
+      data:
+        temperature: 100  # 100°C / 212°F for boiling
+    - service: water_heater.turn_on
+      target:
+        entity_id: water_heater.cosori_kettle
+
+# Green tea temperature - 80°C
+- alias: "Evening Green Tea"
+  description: "Heat water to optimal green tea temperature"
+  trigger:
+    - platform: time
+      at: "20:00:00"
+  condition:
+    - condition: state
+      entity_id: binary_sensor.cosori_kettle_on_base
+      state: "on"
+  action:
+    - service: water_heater.set_temperature
+      target:
+        entity_id: water_heater.cosori_kettle
+      data:
+        temperature: 80  # Optimal for green tea
+    - service: water_heater.turn_on
+      target:
+        entity_id: water_heater.cosori_kettle
+
+# Notify when water is ready
+- alias: "Kettle Ready Notification"
+  description: "Send notification when water reaches target temperature"
+  trigger:
+    - platform: numeric_state
+      entity_id: sensor.cosori_kettle_current_temperature
+      above: 96  # Near boiling (adjust based on your target)
+  condition:
+    - condition: state
+      entity_id: binary_sensor.cosori_kettle_heating
+      state: "on"
+    # Prevent repeat notifications within 10 minutes
+    - condition: template
+      value_template: >
+        {{ (now() - state_attr('automation.kettle_ready_notification', 'last_triggered') | default(now() - timedelta(minutes=10))).total_seconds() > 600 }}
+  action:
+    - service: notify.mobile_app
+      data:
+        message: "Your water is ready!"
+        title: "Kettle"
+    # Optional: Turn off heating after notification
+    # - service: water_heater.turn_off
+    #   target:
+    #     entity_id: water_heater.cosori_kettle
+
+# Voice assistant trigger
+- alias: "Alexa - Boil Kettle"
+  description: "Start boiling kettle via voice command"
+  trigger:
+    - platform: event
+      event_type: alexa_actionable_notification
+      event_data:
+        event_id: boil_kettle
+  condition:
+    - condition: state
+      entity_id: binary_sensor.cosori_kettle_on_base
+      state: "on"
+  action:
+    - service: water_heater.set_temperature
+      target:
+        entity_id: water_heater.cosori_kettle
+      data:
+        temperature: 100
+    - service: water_heater.turn_on
+      target:
+        entity_id: water_heater.cosori_kettle
+
+# Auto-stop heating after 30 minutes (safety)
+- alias: "Kettle Auto-Stop After 30min"
+  description: "Automatically stop heating after 30 minutes to save energy"
+  trigger:
+    - platform: state
+      entity_id: binary_sensor.cosori_kettle_heating
+      to: "on"
+      for:
+        minutes: 30
+  action:
+    - service: water_heater.turn_off
+      target:
+        entity_id: water_heater.cosori_kettle
+    - service: notify.mobile_app
+      data:
+        message: "Kettle has been heating for 30 minutes and was automatically stopped"
+        title: "Kettle Auto-Stop"
+
+# Temperature-specific presets using input_select
+- alias: "Kettle Preset Temperature"
+  description: "Heat to preset temperature based on input_select"
+  trigger:
+    - platform: state
+      entity_id: input_select.kettle_preset
+  condition:
+    - condition: state
+      entity_id: binary_sensor.cosori_kettle_on_base
+      state: "on"
+    - condition: template
+      value_template: "{{ trigger.to_state.state != 'Off' }}"
+  action:
+    - service: water_heater.set_temperature
+      target:
+        entity_id: water_heater.cosori_kettle
+      data:
+        temperature: >
+          {% if trigger.to_state.state == 'Green Tea (80°C)' %}
+            80
+          {% elif trigger.to_state.state == 'White Tea (85°C)' %}
+            85
+          {% elif trigger.to_state.state == 'Coffee (100°C)' %}
+            100
+          {% elif trigger.to_state.state == 'Black Tea (95°C)' %}
+            95
+          {% else %}
+            100
+          {% endif %}
+    - service: water_heater.turn_on
+      target:
+        entity_id: water_heater.cosori_kettle
+
+# Warn if kettle removed from base while heating
+- alias: "Kettle Removed While Heating"
+  description: "Notify if kettle is removed from base during heating"
+  trigger:
+    - platform: state
+      entity_id: binary_sensor.cosori_kettle_on_base
+      from: "on"
+      to: "off"
+  condition:
+    - condition: state
+      entity_id: binary_sensor.cosori_kettle_heating
+      state: "on"
+  action:
+    - service: notify.mobile_app
+      data:
+        message: "Kettle was removed from base while heating"
+        title: "Kettle Warning"
+
+# Daily reminder to descale (every 30 days)
+- alias: "Kettle Descale Reminder"
+  description: "Remind to descale kettle every 30 days"
+  trigger:
+    - platform: time
+      at: "09:00:00"
+  condition:
+    - condition: template
+      value_template: >
+        {{ (now() - states.input_datetime.kettle_last_descaled.last_changed).days >= 30 }}
+  action:
+    - service: notify.mobile_app
+      data:
+        message: "Time to descale your Cosori Kettle for optimal performance"
+        title: "Kettle Maintenance"
+
+# Example input_select for presets (add to configuration.yaml)
+# input_select:
+#   kettle_preset:
+#     name: Kettle Temperature Preset
+#     options:
+#       - "Off"
+#       - "Green Tea (80°C)"
+#       - "White Tea (85°C)"
+#       - "Black Tea (95°C)"
+#       - "Coffee (100°C)"
+#     initial: "Off"
+#     icon: mdi:kettle
+
+# Example input_datetime for descale tracking (add to configuration.yaml)
+# input_datetime:
+#   kettle_last_descaled:
+#     name: Kettle Last Descaled
+#     has_date: true
+#     has_time: false
