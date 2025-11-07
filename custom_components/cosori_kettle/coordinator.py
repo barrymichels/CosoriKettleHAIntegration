@@ -14,18 +14,8 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import DOMAIN, UPDATE_INTERVAL
-
-# Import the device class from the local library path
-import sys
-from pathlib import Path
-
-# Add the library to path for development (will use PyPI package in production)
-lib_path = Path(__file__).parent.parent.parent / "cosori_kettle_ble"
-if lib_path.exists():
-    sys.path.insert(0, str(lib_path.parent))
-
-from cosori_kettle_ble import CosoriKettleDevice
-from cosori_kettle_ble.exceptions import (
+from .cosori_kettle_ble import CosoriKettleDevice
+from .cosori_kettle_ble.exceptions import (
     CosoriKettleConnectionError,
     CosoriKettleError,
 )
