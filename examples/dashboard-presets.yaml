@@ -1,0 +1,114 @@
+# Requires Mushroom cards and Fahrenheit temperatures in Home Assistant.
+# Replace water_heater.cosori_kettle if your entity ID differs.
+type: horizontal-stack
+cards:
+  - type: custom:mushroom-template-card
+    primary: Black Tea
+    entity: water_heater.cosori_kettle
+    secondary: |-
+      {% if is_state(entity, 'on')
+            and state_attr(entity, 'temperature') | float(0) | round(0) == 212 %}
+        {{ state_attr(entity, 'current_temperature') | float(0) | round(0) | int }}°F / 212°F
+      {% endif %}
+    icon: mdi:tea
+    vertical: true
+    tap_action:
+      action: perform-action
+      perform_action: water_heater.set_temperature
+      target:
+        entity_id: water_heater.cosori_kettle
+      data:
+        temperature: 212
+        operation_mode: "on"
+    color: |-
+      {% if is_state(entity, 'on')
+            and state_attr(entity, 'temperature') | float(0) | round(0) == 212 %}
+        orange
+      {% else %}
+        disabled
+      {% endif %}
+    features_position: bottom
+    icon_tap_action:
+      action: none
+
+  - type: custom:mushroom-template-card
+    primary: Matcha
+    entity: water_heater.cosori_kettle
+    secondary: |-
+      {% if is_state(entity, 'on')
+            and state_attr(entity, 'temperature') | float(0) | round(0) == 155 %}
+        {{ state_attr(entity, 'current_temperature') | float(0) | round(0) | int }}°F / 155°F
+      {% endif %}
+    icon: mdi:tea
+    vertical: true
+    tap_action:
+      action: perform-action
+      perform_action: water_heater.set_temperature
+      target:
+        entity_id: water_heater.cosori_kettle
+      data:
+        temperature: 155
+        operation_mode: "on"
+    color: |-
+      {% if is_state(entity, 'on')
+            and state_attr(entity, 'temperature') | float(0) | round(0) == 155 %}
+        green
+      {% else %}
+        disabled
+      {% endif %}
+    features_position: bottom
+    icon_tap_action:
+      action: none
+
+  - type: custom:mushroom-template-card
+    primary: Coffee
+    entity: water_heater.cosori_kettle
+    secondary: |-
+      {% if is_state(entity, 'on')
+            and state_attr(entity, 'temperature') | float(0) | round(0) == 185 %}
+        {{ state_attr(entity, 'current_temperature') | float(0) | round(0) | int }}°F / 185°F
+      {% endif %}
+    icon: mdi:coffee-maker
+    vertical: true
+    tap_action:
+      action: perform-action
+      perform_action: water_heater.set_temperature
+      target:
+        entity_id: water_heater.cosori_kettle
+      data:
+        temperature: 185
+        operation_mode: "on"
+    color: |-
+      {% if is_state(entity, 'on')
+            and state_attr(entity, 'temperature') | float(0) | round(0) == 185 %}
+        brown
+      {% else %}
+        disabled
+      {% endif %}
+    features_position: bottom
+    icon_tap_action:
+      action: none
+
+  - type: custom:mushroom-template-card
+    primary: "Off"
+    entity: water_heater.cosori_kettle
+    secondary: |-
+      {% if state_attr(entity, 'current_temperature') | float(0) > 100 %}
+        {{ state_attr(entity, 'current_temperature') | float(0) | round(0) | int }}°F
+      {% endif %}
+    icon: mdi:kettle-off
+    vertical: true
+    tap_action:
+      action: perform-action
+      perform_action: water_heater.turn_off
+      target:
+        entity_id: water_heater.cosori_kettle
+    color: |-
+      {% if is_state(entity, 'off') %}
+        red
+      {% else %}
+        disabled
+      {% endif %}
+    features_position: bottom
+    icon_tap_action:
+      action: none

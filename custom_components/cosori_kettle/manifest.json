@@ -1,7 +1,9 @@
 {
   "domain": "cosori_kettle",
   "name": "Cosori Kettle",
-  "codeowners": ["@barrymichels"],
+  "codeowners": [
+    "@barrymichels"
+  ],
   "config_flow": true,
   "bluetooth": [
     {
@@ -9,10 +11,17 @@
       "service_uuid": "0000fff0-0000-1000-8000-00805f9b34fb"
     }
   ],
-  "dependencies": ["bluetooth_adapters"],
+  "dependencies": [
+    "bluetooth_adapters"
+  ],
   "documentation": "https://github.com/barrymichels/CosoriKettleHAIntegration",
-  "iot_class": "local_push",
-  "loggers": ["cosori_kettle_ble"],
-  "requirements": ["bleak>=0.21.0", "bleak-retry-connector>=3.1.0"],
-  "version": "0.1.0"
+  "iot_class": "local_polling",
+  "loggers": [
+    "cosori_kettle_ble"
+  ],
+  "requirements": [
+    "bleak-retry-connector==4.7.0"
+  ],
+  "version": "0.2.0",
+  "integration_type": "device"
 }

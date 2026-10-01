@@ -1,9 +1,9 @@
 # Example Lovelace dashboard configuration for Cosori Kettle
 
-# Simple thermostat card
-type: thermostat
-entity: water_heater.cosori_kettle
-name: Cosori Kettle
+# Main controls: open the water heater more-info dialog.
+type: entities
+entities:
+  - water_heater.cosori_kettle
 
 ---
 
@@ -11,9 +11,9 @@ name: Cosori Kettle
 type: vertical-stack
 cards:
   # Main control card
-  - type: thermostat
-    entity: water_heater.cosori_kettle
-    name: Cosori Kettle
+  - type: entities
+    entities:
+      - water_heater.cosori_kettle
 
   # Status entities
   - type: entities
@@ -106,7 +106,7 @@ cards:
 
 ---
 
-# Advanced card with conditional elements (requires card-mod)
+# Advanced card with conditional elements (requires slider-entity-row)
 type: entities
 title: Cosori Kettle
 entities:

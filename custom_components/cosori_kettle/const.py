@@ -5,7 +5,7 @@ from typing import Final
 DOMAIN: Final = "cosori_kettle"
 
 # Configuration
-CONF_DEVICE_NAME: Final = "device_name"
+CONF_HANDSHAKE: Final = "handshake"
 
 # Update intervals
 UPDATE_INTERVAL: Final = 2  # seconds

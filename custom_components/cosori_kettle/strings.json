@@ -2,19 +2,35 @@
   "config": {
     "step": {
       "bluetooth_confirm": {
-        "description": "Do you want to add the Cosori Kettle {name} to Home Assistant?"
+        "description": "Do you want to add the Cosori Kettle {name} to Home Assistant?",
+        "data": {
+          "handshake_1": "Custom handshake packet 1 (optional)",
+          "handshake_2": "Custom handshake packet 2 (optional)",
+          "handshake_3": "Custom handshake packet 3 (optional)"
+        }
       },
       "user": {
         "data": {
-          "address": "Device"
+          "address": "Device",
+          "handshake_1": "Custom handshake packet 1 (optional)",
+          "handshake_2": "Custom handshake packet 2 (optional)",
+          "handshake_3": "Custom handshake packet 3 (optional)"
         },
-        "description": "Select your Cosori Kettle from the list of discovered devices."
+        "description": "Select a discovered device or enter your kettle\u2019s Bluetooth MAC address. Setup checks the kettle protocol without starting heating."
       }
     },
     "abort": {
       "already_configured": "Device is already configured",
       "no_devices_found": "No Cosori Kettles found. Make sure your kettle is powered on and within Bluetooth range.",
       "not_supported": "This device is not a supported Cosori Kettle"
+    },
+    "flow_title": "{name}",
+    "error": {
+      "cannot_connect": "Home Assistant found a Bluetooth route to this MAC, but could not connect to or register with the kettle. The underlying error is recorded in Home Assistant logs.",
+      "invalid_address": "Enter a Bluetooth MAC address such as AA:BB:CC:DD:EE:FF.",
+      "invalid_handshake": "Enter all three handshake packets as hexadecimal bytes, copied from your working ESPHome configuration.",
+      "not_reachable": "Home Assistant has no connectable Bluetooth route to this MAC. Check that your proxy is connected through the ESPHome integration and that the MAC appears in the Bluetooth advertisement monitor. Home Assistant logs contain the reachability details.",
+      "no_status": "Connected and sent registration, but no valid kettle status was received. Home Assistant logs contain the status error; enable integration debug logging to inspect notification handling."
     }
   },
   "entity": {

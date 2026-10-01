@@ -1,7 +1,11 @@
 {
   "name": "Cosori Kettle",
   "render_readme": true,
-  "domains": ["water_heater", "sensor", "binary_sensor"],
-  "homeassistant": "2023.9.0",
-  "iot_class": "Local Push"
+  "domains": [
+    "water_heater",
+    "sensor",
+    "binary_sensor"
+  ],
+  "homeassistant": "2026.9.0",
+  "iot_class": "Local Poll"
 }

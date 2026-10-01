@@ -1,26 +1,19 @@
-"""Cosori Kettle BLE device implementation."""
+"""Persistent Cosori BLE connection and serialized command transactions."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Callable
+from collections.abc import Callable
+from types import TracebackType
 
 from bleak import BleakClient
+from bleak.backends.characteristic import BleakGATTCharacteristic
 from bleak.backends.device import BLEDevice
 from bleak.exc import BleakError
+from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
 
-from .const import (
-    COMMAND_DELAY_MS,
-    HELLO_DELAY_MS,
-    MAX_TEMP_C,
-    MAX_TEMP_F,
-    MIN_TEMP_C,
-    MIN_TEMP_F,
-    RX_CHAR_UUID,
-    SERVICE_UUID,
-    TX_CHAR_UUID,
-)
+from .const import MAX_TEMP_C, MIN_TEMP_C, RX_CHAR_UUID, TX_CHAR_UUID
 from .exceptions import (
     CosoriKettleConnectionError,
     CosoriKettleError,
@@ -34,25 +27,32 @@ from .protocol import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+STATUS_TIMEOUT = 5.0
 
 
 class CosoriKettleDevice:
-    """Represents a Cosori Kettle BLE device."""
+    """Use BLE devices supplied by HA so local adapters and proxies both work."""
 
     def __init__(
         self,
         device: BLEDevice,
         disconnect_callback: Callable[[BLEDevice], None] | None = None,
+        ble_device_callback: Callable[[], BLEDevice] | None = None,
+        handshake: list[bytes] | None = None,
     ) -> None:
-        """Initialize the device."""
         self._device = device
+        self._ble_device_callback = ble_device_callback
+        self._handshake = handshake
         self._client: BleakClient | None = None
         self._protocol = CosoriProtocol()
         self._disconnect_callback = disconnect_callback
         self._status: KettleStatus | None = None
-        self._is_connected = False
+        self._target_temp_f: int | None = None
+        self._ready = False
+        self._notifications_received = 0
         self._notification_event = asyncio.Event()
         self._connection_lock = asyncio.Lock()
+        self._operation_lock = asyncio.Lock()
 
     @property
     def address(self) -> str:
@@ -66,236 +66,242 @@ class CosoriKettleDevice:
 
     @property
     def is_connected(self) -> bool:
-        """Return if device is connected."""
-        return self._is_connected and self._client is not None and self._client.is_connected
-
-    @property
-    def current_temp_c(self) -> float | None:
-        """Return current temperature in Celsius."""
-        if self._status is None:
-            return None
-        return fahrenheit_to_celsius(self._status.current_temp_f)
+        """A connected client is usable only after registration completes."""
+        return self._ready and self._client is not None and self._client.is_connected
 
     @property
     def current_temp_f(self) -> float | None:
-        """Return current temperature in Fahrenheit."""
-        if self._status is None:
-            return None
-        return self._status.current_temp_f
+        return self._status.current_temp_f if self._status is not None else None
 
     @property
-    def target_temp_c(self) -> float | None:
-        """Return target temperature in Celsius."""
-        if self._status is None:
-            return None
-        return fahrenheit_to_celsius(self._status.target_temp_f)
+    def current_temp_c(self) -> float | None:
+        temp = self.current_temp_f
+        return fahrenheit_to_celsius(temp) if temp is not None else None
 
     @property
     def target_temp_f(self) -> float | None:
-        """Return target temperature in Fahrenheit."""
-        if self._status is None:
-            return None
-        return self._status.target_temp_f
+        return self._target_temp_f
 
     @property
-    def on_base(self) -> bool:
-        """Return if kettle is on charging base."""
-        if self._status is None:
-            return False
-        return self._status.on_base
+    def target_temp_c(self) -> float | None:
+        temp = self.target_temp_f
+        return fahrenheit_to_celsius(temp) if temp is not None else None
+
+    @property
+    def on_base(self) -> bool | None:
+        return self._status.on_base if self._status is not None else None
 
     @property
     def heating(self) -> bool:
-        """Return if kettle is actively heating."""
-        if self._status is None:
-            return False
-        return self._status.heating
+        return self._status.heating if self._status is not None else False
 
     def _handle_disconnect(self, client: BleakClient) -> None:
-        """Handle disconnect from device."""
-        _LOGGER.debug("Disconnected from %s", self.address)
-        self._is_connected = False
+        if client is not self._client:
+            return
+        self._ready = False
+        self._status = None
+        self._notification_event.set()
         if self._disconnect_callback:
             self._disconnect_callback(self._device)
 
-    def _handle_notification(self, sender: int, data: bytes) -> None:
-        """Handle notification from device."""
-        _LOGGER.debug("Received notification: %s", data.hex())
-        status = self._protocol.parse_status(data)
-        if status:
+    def _handle_notification(
+        self, sender: BleakGATTCharacteristic, data: bytearray
+    ) -> None:
+        self._notifications_received += 1
+        statuses = self._protocol.feed(data)
+        _LOGGER.debug(
+            "Kettle %s: received %d notification bytes, decoded %d status frames",
+            self.address,
+            len(data),
+            len(statuses),
+        )
+        for status in statuses:
             self._status = status
             _LOGGER.debug(
-                "Status update: temp=%.1f°F, target=%.1f°F, on_base=%s, heating=%s",
+                "Kettle %s: temperature=%s°F, setpoint=%s°F, on_base=%s, heating=%s",
+                self.address,
                 status.current_temp_f,
                 status.target_temp_f,
                 status.on_base,
                 status.heating,
             )
+            if self._target_temp_f is None and 104 <= status.target_temp_f <= 212:
+                self._target_temp_f = int(status.target_temp_f)
             self._notification_event.set()
 
     async def connect(self, timeout: float = 30.0) -> None:
-        """Connect to the device."""
+        """Connect with retries and register before allowing other operations."""
         async with self._connection_lock:
             if self.is_connected:
-                _LOGGER.debug("Already connected to %s", self.address)
                 return
-
+            await self._disconnect()
+            self._protocol = CosoriProtocol()
+            self._notification_event.clear()
             try:
-                _LOGGER.debug("Connecting to %s", self.address)
-                self._client = BleakClient(
+                if self._ble_device_callback:
+                    self._device = self._ble_device_callback()
+                _LOGGER.debug("Connecting to kettle %s", self.address)
+                self._client = await establish_connection(
+                    BleakClientWithServiceCache,
                     self._device,
+                    self.name,
                     disconnected_callback=self._handle_disconnect,
+                    ble_device_callback=self._ble_device_callback,
                     timeout=timeout,
                 )
-                await self._client.connect()
-                self._is_connected = True
-                _LOGGER.info("Connected to %s", self.address)
-
-                # Start notifications
-                await self._client.start_notify(
-                    RX_CHAR_UUID, self._handle_notification
+                _LOGGER.debug(
+                    "Connected to kettle %s; subscribing to status", self.address
                 )
-                _LOGGER.debug("Started notifications on %s", RX_CHAR_UUID)
+                await self._client.start_notify(
+                    str(RX_CHAR_UUID), self._handle_notification
+                )
+                for packet in self._handshake or self._protocol.build_hello_min():
+                    await self._send_command(packet)
+                    await asyncio.sleep(0.08)
+                self._ready = True
+                _LOGGER.debug("Kettle %s: registration sent", self.address)
+            except BaseException as err:
+                # Cancelled setup must release the proxy slot too.
+                await self._disconnect()
+                if isinstance(err, TimeoutError):
+                    raise CosoriKettleTimeoutError(
+                        "Timeout connecting to kettle"
+                    ) from err
+                if isinstance(err, (BleakError, OSError)):
+                    raise CosoriKettleConnectionError(
+                        f"Could not connect: {err}"
+                    ) from err
+                raise
 
-                # Send registration handshake (HELLO_MIN)
-                await self._send_hello_handshake()
-                _LOGGER.debug("Registration handshake complete")
-
-            except BleakError as err:
-                self._is_connected = False
-                raise CosoriKettleConnectionError(
-                    f"Failed to connect to {self.address}: {err}"
-                ) from err
-            except asyncio.TimeoutError as err:
-                self._is_connected = False
-                raise CosoriKettleTimeoutError(
-                    f"Timeout connecting to {self.address}"
-                ) from err
+    async def _disconnect(self) -> None:
+        client, self._client = self._client, None
+        self._ready = False
+        self._status = None
+        self._notification_event.set()
+        if client is not None:
+            try:
+                # disconnect also removes notifications; a failed stop_notify
+                # must never prevent releasing the BLE connection.
+                await client.disconnect()
+            except (BleakError, OSError, TimeoutError):
+                _LOGGER.debug("Failed to disconnect %s", self.address, exc_info=True)
 
     async def disconnect(self) -> None:
-        """Disconnect from the device."""
-        async with self._connection_lock:
-            if not self._client:
-                return
-
-            try:
-                if self._client.is_connected:
-                    await self._client.stop_notify(RX_CHAR_UUID)
-                    await self._client.disconnect()
-                _LOGGER.info("Disconnected from %s", self.address)
-            except BleakError as err:
-                _LOGGER.warning("Error disconnecting from %s: %s", self.address, err)
-            finally:
-                self._is_connected = False
-                self._client = None
-
-    async def _send_hello_handshake(self) -> None:
-        """Send HELLO_MIN registration handshake."""
-        if not self._client or not self._client.is_connected:
-            raise CosoriKettleConnectionError("Not connected")
-
-        packets = self._protocol.build_hello_min()
-        for i, packet in enumerate(packets):
-            _LOGGER.debug("Sending HELLO_MIN packet %d/%d: %s", i + 1, len(packets), packet.hex())
-            await self._client.write_gatt_char(TX_CHAR_UUID, packet, response=False)
-            if i < len(packets) - 1:
-                await asyncio.sleep(HELLO_DELAY_MS / 1000.0)
+        """Wait for active transactions, then release the connection."""
+        async with self._operation_lock, self._connection_lock:
+            await self._disconnect()
 
     async def _send_command(self, data: bytes) -> None:
-        """Send command to device."""
-        if not self._client or not self._client.is_connected:
-            raise CosoriKettleConnectionError("Not connected")
-
-        _LOGGER.debug("Sending command: %s", data.hex())
-        await self._client.write_gatt_char(TX_CHAR_UUID, data, response=False)
-
-    async def update(self) -> None:
-        """Poll device for status update."""
-        if not self.is_connected:
-            await self.connect()
-
-        poll_cmd = self._protocol.build_poll()
-        await self._send_command(poll_cmd)
-
-        # Wait for notification with timeout
+        if self._client is None or not self._client.is_connected:
+            raise CosoriKettleConnectionError("Kettle disconnected")
         try:
-            self._notification_event.clear()
-            await asyncio.wait_for(self._notification_event.wait(), timeout=5.0)
-        except asyncio.TimeoutError:
-            _LOGGER.warning("Timeout waiting for status update from %s", self.address)
+            await self._client.write_gatt_char(str(TX_CHAR_UUID), data, response=False)
+        except (BleakError, OSError, TimeoutError) as err:
+            await self._disconnect()
+            raise CosoriKettleConnectionError(
+                f"Could not write command: {err}"
+            ) from err
 
-    async def set_target_temperature(self, temp_c: float) -> None:
-        """Set target temperature in Celsius."""
-        if not MIN_TEMP_C <= temp_c <= MAX_TEMP_C:
-            raise CosoriKettleError(
-                f"Temperature {temp_c}°C out of range ({MIN_TEMP_C}-{MAX_TEMP_C}°C)"
+    async def _wait_status(self, timeout: float = STATUS_TIMEOUT) -> None:
+        try:
+            await asyncio.wait_for(self._notification_event.wait(), timeout)
+        except TimeoutError as err:
+            await self._disconnect()
+            raise CosoriKettleTimeoutError(
+                f"No valid kettle status received from {self.address} "
+                f"({self._notifications_received} BLE notifications "
+                "received during poll)"
+            ) from err
+        if not self.is_connected or self._status is None:
+            raise CosoriKettleConnectionError(
+                "Kettle disconnected while awaiting status"
             )
 
-        if not self.is_connected:
+    async def _poll(self) -> None:
+        _LOGGER.debug("Kettle %s: requesting fresh status", self.address)
+        self._notifications_received = 0
+        self._notification_event.clear()
+        await self._send_command(self._protocol.build_poll())
+        await self._wait_status()
+
+    async def update(self) -> None:
+        """Poll and require a fresh valid status; never accept stale data."""
+        async with self._operation_lock:
             await self.connect()
+            await self._poll()
 
-        # Convert to Fahrenheit and round to nearest integer
-        temp_f = round(celsius_to_fahrenheit(temp_c))
-        temp_f = max(MIN_TEMP_F, min(MAX_TEMP_F, temp_f))
+    async def set_target_temperature(
+        self, temp_c: float, *, start: bool | None = None
+    ) -> bool:
+        """Stage/apply a target and return whether fresh status was received."""
+        if not MIN_TEMP_C <= temp_c <= MAX_TEMP_C:
+            raise CosoriKettleError(f"Temperature must be {MIN_TEMP_C}-{MAX_TEMP_C}°C")
+        async with self._operation_lock:
+            self._target_temp_f = round(celsius_to_fahrenheit(temp_c))
+            if start is False:
+                await self.connect()
+                await self._stop_heating()
+                return True
+            elif start is True or self.heating:
+                await self.connect()
+                await self._start_heating()
+                return True
+            return False
 
-        _LOGGER.info("Setting target temperature to %d°F (%.1f°C)", temp_f, temp_c)
-
-        # Send command sequence: HELLO5 -> SETPOINT -> CTRL
+    async def _start_heating(self) -> None:
+        if self._status is None:
+            await self._poll()
+        if self.on_base is not True:
+            raise CosoriKettleError("Place the kettle on its base before heating")
+        if self._target_temp_f is None:
+            raise CosoriKettleError("Set a target temperature before heating")
         await self._send_command(self._protocol.build_hello5())
-        await asyncio.sleep(COMMAND_DELAY_MS / 1000.0)
-
-        await self._send_command(self._protocol.build_setpoint(temp_f))
-        await asyncio.sleep(COMMAND_DELAY_MS / 1000.0)
-
-        await self._send_command(self._protocol.build_ctrl(start=True))
-
-        # Request updated status
-        await asyncio.sleep(0.5)
-        await self.update()
+        await asyncio.sleep(0.06)
+        self._notification_event.clear()
+        await self._send_command(self._protocol.build_setpoint(self._target_temp_f))
+        await asyncio.sleep(0.1)
+        # The working implementation permits control after a 2s status wait.
+        try:
+            await asyncio.wait_for(self._notification_event.wait(), 2.0)
+        except TimeoutError:
+            pass
+        await self._send_command(self._protocol.build_ctrl())
+        await asyncio.sleep(0.05)
+        await self._send_command(self._protocol.build_ctrl(echo=False))
+        await asyncio.sleep(0.05)
+        await self._poll()
 
     async def start_heating(self) -> None:
-        """Start heating to current target temperature."""
-        if not self.is_connected:
+        """Start with the working HELLO5 / SETPOINT / echoed CTRL sequence."""
+        async with self._operation_lock:
             await self.connect()
+            await self._start_heating()
 
-        if self._status is None or self._status.target_temp_f == 0:
-            raise CosoriKettleError("No target temperature set")
-
-        _LOGGER.info("Starting heating to %.1f°F", self._status.target_temp_f)
-
-        # Send control command to start
-        await self._send_command(self._protocol.build_hello5())
-        await asyncio.sleep(COMMAND_DELAY_MS / 1000.0)
-
-        await self._send_command(
-            self._protocol.build_setpoint(int(self._status.target_temp_f))
-        )
-        await asyncio.sleep(COMMAND_DELAY_MS / 1000.0)
-
-        await self._send_command(self._protocol.build_ctrl(start=True))
-
-        # Request updated status
-        await asyncio.sleep(0.5)
-        await self.update()
+    async def _stop_heating(self) -> None:
+        if self._status is None:
+            await self._poll()
+        await self._send_command(self._protocol.build_f4())
+        await asyncio.sleep(0.05)
+        await self._send_command(self._protocol.build_ctrl())
+        await asyncio.sleep(0.05)
+        await self._send_command(self._protocol.build_f4())
+        await asyncio.sleep(0.05)
+        await self._poll()
 
     async def stop_heating(self) -> None:
-        """Stop heating."""
-        if not self.is_connected:
+        """Stop using F4 / echoed CTRL / F4, then verify fresh status."""
+        async with self._operation_lock:
             await self.connect()
-
-        _LOGGER.info("Stopping heating")
-
-        await self._send_command(self._protocol.build_ctrl(start=False))
-
-        # Request updated status
-        await asyncio.sleep(0.5)
-        await self.update()
+            await self._stop_heating()
 
     async def __aenter__(self) -> CosoriKettleDevice:
-        """Async context manager entry."""
         await self.connect()
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
-        """Async context manager exit."""
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
         await self.disconnect()

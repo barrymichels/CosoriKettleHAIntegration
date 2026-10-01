@@ -1,136 +1,26 @@
-# Quick Start Guide
+# Quick start
 
-Get your Cosori Kettle integrated with Home Assistant in minutes!
+Requires Home Assistant 2026.9 or newer and a connectable Bluetooth adapter or active ESPHome Bluetooth Proxy.
 
-## Prerequisites
+1. Save the kettle MAC and any custom handshake from your working ESPHome YAML.
+2. Disable the old kettle BLE connection and close the VeSync app. The kettle accepts one connection at a time.
+3. If using the old ESP32 as a proxy, configure `bluetooth_proxy: {active: true}` with `esp32_ble_tracker:` and remove its kettle client/component and dependent entities.
+4. Copy `custom_components/cosori_kettle/` from this repository into `/config/custom_components/`. The resulting path must be `/config/custom_components/cosori_kettle/manifest.json`.
+5. Restart Home Assistant, then add **Cosori Kettle** in **Settings → Devices & services**. Select a discovered device or enter the MAC. Advanced setup options accept the three custom handshake packets if needed.
 
-- ✅ Home Assistant 2023.9 or newer
-- ✅ Bluetooth adapter or ESPHome Bluetooth Proxy
-- ✅ Cosori Electric Kettle (BLE-enabled)
-
-## Installation
-
-### Method 1: Manual Installation
-
-1. **Copy the integration:**
-   ```bash
-   cd /config/custom_components/
-   git clone https://github.com/barrymichels/CosoriKettleHAIntegration.git cosori_kettle
-   ```
-
-2. **Restart Home Assistant**
-
-### Method 2: HACS (Recommended)
-
-1. Open HACS in Home Assistant
-2. Click "Integrations"
-3. Click the menu (⋮) and select "Custom repositories"
-4. Add: `https://github.com/barrymichels/CosoriKettleHAIntegration`
-5. Category: Integration
-6. Click "Add"
-7. Find "Cosori Kettle" and click "Download"
-8. Restart Home Assistant
-
-## Setup
-
-1. **Prepare the kettle:**
-   - Fill with water
-   - Place on charging base
-   - Ensure no other apps are connected
-
-2. **Add the integration:**
-   - Go to Settings → Devices & Services
-   - Click "+ Add Integration"
-   - Search for "Cosori Kettle"
-   - Select your kettle from the list
-   - Click "Submit"
-
-3. **Done!** Your kettle is now integrated
-
-## First Test
-
-Try these commands:
+Setup reads status without heating. Set a target and start using:
 
 ```yaml
-# Set temperature to 100°C and start heating
-service: water_heater.set_temperature
+action: water_heater.set_temperature
 target:
   entity_id: water_heater.cosori_kettle
 data:
-  temperature: 100
-  operation_mode: "on"
-
-# Stop heating
-service: water_heater.turn_off
-target:
-  entity_id: water_heater.cosori_kettle
-```
-
-## Entities Created
-
-After setup, you'll have:
-
-- 🌡️ **water_heater.cosori_kettle** - Main control
-- 📊 **sensor.cosori_kettle_current_temperature** - Current temp
-- 📊 **sensor.cosori_kettle_target_temperature** - Target temp
-- 🔌 **binary_sensor.cosori_kettle_on_base** - On/off base
-- 🔥 **binary_sensor.cosori_kettle_heating** - Heating status
-
-## Quick Actions
-
-### Boil Water
-```yaml
-service: water_heater.set_temperature
-data:
-  entity_id: water_heater.cosori_kettle
-  temperature: 100
+  temperature: 100  # 212 with a Fahrenheit-configured Home Assistant.
   operation_mode: "on"
 ```
 
-### Green Tea (80°C)
-```yaml
-service: water_heater.set_temperature
-data:
-  entity_id: water_heater.cosori_kettle
-  temperature: 80
-  operation_mode: "on"
-```
+Stop using `water_heater.turn_off`. Setting temperature without an operation mode while off stages it for the next start.
 
-### Stop Heating
-```yaml
-service: water_heater.turn_off
-target:
-  entity_id: water_heater.cosori_kettle
-```
+For a dashboard, use an entities card containing `water_heater.cosori_kettle`; open its more-info dialog to control it. The thermostat card requires a climate entity.
 
-## Dashboard Card
-
-Add this to your Lovelace dashboard:
-
-```yaml
-type: thermostat
-entity: water_heater.cosori_kettle
-name: Kettle
-```
-
-## Troubleshooting
-
-**Kettle not discovered?**
-- Ensure it's on the base and powered
-- Check Bluetooth is enabled
-- Power cycle the kettle
-
-**Connection errors?**
-- Close the Cosori mobile app
-- Restart Home Assistant
-- Move Bluetooth adapter closer
-
-**More help?** See [README.md](README.md) for full documentation.
-
-## Next Steps
-
-- ✨ Add [automations](examples/automations.yaml) for scheduled heating
-- 📱 Set up notifications when water is ready
-- 🎨 Customize your [dashboard](examples/dashboard.yaml)
-
-Enjoy your smart kettle! ☕
+See [README.md](README.md) for migration details, troubleshooting, and the physical-kettle verification steps.

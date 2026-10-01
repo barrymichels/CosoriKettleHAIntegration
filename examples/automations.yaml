@@ -1,3 +1,4 @@
+# Temperature values below assume Home Assistant uses Celsius.
 # Example automations for Cosori Kettle Home Assistant Integration
 
 # Morning coffee - heat to boiling at 7 AM
@@ -54,7 +55,7 @@
     # Prevent repeat notifications within 10 minutes
     - condition: template
       value_template: >
-        {{ (now() - state_attr('automation.kettle_ready_notification', 'last_triggered') | default(now() - timedelta(minutes=10))).total_seconds() > 600 }}
+        {{ (now() - state_attr('automation.kettle_ready_notification', 'last_triggered') | default(now() - timedelta(minutes=10), true)).total_seconds() > 600 }}
   action:
     - service: notify.mobile_app
       data:

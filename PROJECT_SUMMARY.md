@@ -1,224 +1,46 @@
-# Cosori Kettle HA Integration - Project Summary
+# Review and compatibility update
 
-## ✅ Implementation Complete
+Reviewed against Home Assistant **2026.9.4** (latest stable checked October 1, 2026) and working CosoriKettleBLE commit [`094411bf156e879f6b08106869148c2421856ff4`](https://github.com/barrymichels/CosoriKettleBLE/blob/094411bf156e879f6b08106869148c2421856ff4/components/cosori_kettle_ble/cosori_kettle_ble.cpp).
 
-A complete Home Assistant integration for Cosori Electric Kettles using Bluetooth Proxy has been successfully created.
+## Protocol / ESPHome comparison
 
-## 📁 Project Structure
+The original Python implementation could not communicate correctly with the working kettle protocol. Both duplicated library copies had these blockers:
 
-```
-CosoriKettleHAIntegration/
-├── cosori_kettle_ble/           # Python BLE library
-│   ├── __init__.py              # Package exports
-│   ├── const.py                 # BLE constants and UUIDs
-│   ├── device.py                # Main device class
-│   ├── exceptions.py            # Custom exceptions
-│   └── protocol.py              # Protocol implementation
-│
-├── custom_components/cosori_kettle/  # HA Integration
-│   ├── __init__.py              # Integration setup
-│   ├── binary_sensor.py         # On-base & heating sensors
-│   ├── config_flow.py           # Bluetooth discovery UI
-│   ├── const.py                 # Integration constants
-│   ├── coordinator.py           # Data update coordinator
-│   ├── manifest.json            # Integration metadata
-│   ├── sensor.py                # Temperature sensors
-│   ├── strings.json             # UI strings
-│   ├── water_heater.py          # Main water heater entity
-│   └── translations/
-│       └── en.json              # English translations
-│
-├── examples/
-│   ├── automations.yaml         # Example automations
-│   └── dashboard.yaml           # Dashboard configurations
-│
-├── .gitignore                   # Git ignore rules
-├── CONTRIBUTING.md              # Contribution guide
-├── hacs.json                    # HACS compatibility
-├── LICENSE                      # MIT License
-├── pyproject.toml               # Python package config
-├── QUICKSTART.md                # Quick start guide
-└── README.md                    # Main documentation
-```
+| Original behavior | Corrected behavior from working C++ |
+|---|---|
+| Unrelated `55 AA` registration packets | Exact default A5 registration split into 20/20/2-byte writes, 80 ms apart |
+| XOR checksum | One's-complement additive checksum; complete frame sums to `0xFF` modulo 256 |
+| Poll type `02`; preparation/setpoint/control type `05` | Poll, HELLO5, SETPOINT, F4 use `22`; CTRL uses `12` |
+| Current/target temperatures from payload offsets 4/5 | Current at 7; target at 6; Fahrenheit on the wire |
+| Incorrect heating field | Compact status uses offset 8; extended status uses stage at 4 |
+| Compact status forces on-base | Preserve base state; extended offset 14 reports it |
+| Assumes one notification is a complete frame | Assemble fragments, process coalesced frames, reject malformed packets |
+| Start sends one fresh-sequence CTRL | HELLO5 → SETPOINT → status-sequence CTRL → fresh-sequence reinforcing CTRL |
+| Stop changes CTRL payload | F4 → status-sequence CTRL → F4 |
+| Temperature selection starts heating | Stage while off; apply while heating or explicitly starting |
 
-## 🎯 Features Implemented
+TX sequence increment/wrap, RX synchronization, and control delays match the C++ implementation. Custom three-packet registration remains available for firmware that requires it. The C++ is authoritative where `PROTOCOL.md` disagrees: that document describes older command types/checksums and contains an incorrectly framed compact example.
 
-### Core Functionality
-- ✅ **BLE Protocol Implementation**
-  - Packet builders and parsers (A5 frames)
-  - Temperature conversion (F ↔ C)
-  - Status parsing (compact & extended)
-  - Connection management
+## Home Assistant / lifecycle review
 
-- ✅ **Water Heater Platform**
-  - Temperature control (40-100°C)
-  - Heating on/off operations
-  - Auto keep-warm functionality
-  - Native thermostat card support
+Corrected integration issues:
 
-- ✅ **Sensors**
-  - Current temperature (enabled by default)
-  - Target temperature (diagnostic)
+- Subscribe/register through retry-connector clients supplied by HA's connectable Bluetooth lookup. Resolve the adapter/proxy again on reconnect.
+- Serialize complete poll and control transactions, and clear status events before writing so immediate notifications are retained.
+- Treat missing valid status as failure; setup cannot succeed on stale/absent data.
+- Release clients after subscription/setup failures, cancelled setup, unload, and HA shutdown.
+- Use `entry.runtime_data`, pass the config entry into the coordinator, and call its base shutdown method.
+- Advertise `OPERATION_MODE`, handle `operation_mode` on temperature actions, and distinguish validation errors from communication failures.
+- Publish verified command results without a redundant second poll. Staged targets cannot restore availability after a failed connection.
+- Validate the kettle status fingerprint during setup because FFF0 advertisements are generic. Accept manual MAC input when the kettle does not advertise that UUID.
+- Use the valid `local_polling` IoT class and the same retry-connector version as HA 2026.9.4.
+- Package the bundled library as the standalone module, removing the second protocol implementation and the need for a separate HA library installation.
+- Correct manual installation paths and replace thermostat-card examples with water-heater-compatible entity cards.
 
-- ✅ **Binary Sensors**
-  - On-base detection
-  - Heating status
+Entity unique IDs remain based on the existing entry ID. The selected target is local while off, matching the working ESPHome behavior; it is applied on start. The original `sw_version: 1.0` was fabricated and is removed.
 
-- ✅ **Bluetooth Discovery**
-  - Automatic device discovery
-  - Service UUID matching
-  - Config flow UI
+## Verification scope
 
-### Technical Implementation
-- ✅ **Async BLE Communication**
-  - Uses `bleak` library
-  - Proper connection management
-  - Notification handling
-  - Auto-reconnection
+The regression suite covers literal ESPHome packet bytes and real status captures, framing/checksum failures, immediate fragmented responses, serialized start/stop transactions, timeout cleanup, temperature validation, custom handshakes, actual Home Assistant platform setup and service dispatch, config-flow probing/duplicates, unavailable states, reconnect routing, and lifecycle cleanup.
 
-- ✅ **Data Coordinator**
-  - 2-second polling interval
-  - State synchronization
-  - Error handling
-
-- ✅ **Home Assistant Integration**
-  - Config flow for UI setup
-  - Device info and entities
-  - Proper entity naming
-  - Translation support
-
-## 📚 Documentation
-
-### User Documentation
-- **README.md**: Complete user guide with features, installation, usage examples
-- **QUICKSTART.md**: Fast setup guide for new users
-- **examples/automations.yaml**: 10+ automation examples
-- **examples/dashboard.yaml**: Dashboard card configurations
-
-### Developer Documentation
-- **CONTRIBUTING.md**: Development setup and contribution guide
-- **Code comments**: Comprehensive docstrings and inline comments
-- **Type hints**: Full type annotations for better IDE support
-
-## 🔧 Technical Details
-
-### BLE Protocol
-- **Service UUID**: `0000fff0-0000-1000-8000-00805f9b34fb`
-- **RX Char**: `0000fff1-0000-1000-8000-00805f9b34fb` (notifications)
-- **TX Char**: `0000fff2-0000-1000-8000-00805f9b34fb` (write)
-- **Frame Types**: 0x22 (compact), 0x12 (extended)
-- **Temperature Range**: 40-100°C (104-212°F)
-
-### Home Assistant
-- **Minimum Version**: 2023.9.0
-- **Dependencies**: bluetooth_adapters
-- **Platforms**: water_heater, sensor, binary_sensor
-- **IoT Class**: local_push
-
-## 🚀 Next Steps
-
-### Testing Phase
-1. **Copy integration to HA config**:
-   ```bash
-   cp -r custom_components/cosori_kettle ~/.homeassistant/custom_components/
-   ```
-
-2. **Restart Home Assistant**
-
-3. **Test discovery**:
-   - Settings → Devices & Services → Add Integration
-   - Search for "Cosori Kettle"
-
-4. **Verify functionality**:
-   - Test temperature setting
-   - Test heating on/off
-   - Check status updates
-   - Test automations
-
-### Pre-Submission Checklist
-- [ ] Test with real Cosori Kettle
-- [ ] Verify Bluetooth Proxy compatibility
-- [ ] Test all entity platforms
-- [ ] Validate temperature conversions
-- [ ] Test error handling (off-base, disconnection)
-- [ ] Review logs for warnings/errors
-- [ ] Add unit tests
-- [ ] Add integration tests
-- [ ] Run code quality checks (ruff, mypy, black)
-
-### Publishing Options
-
-**Option 1: Custom Component (Immediate)**
-- Push to GitHub (already initialized)
-- Users install via HACS or manually
-- Rapid iteration and updates
-
-**Option 2: HA Core Submission (Later)**
-- Create PyPI package for `cosori-kettle-ble`
-- Move integration to `homeassistant/components/`
-- Add comprehensive tests
-- Submit PR to home-assistant/core
-- Address review feedback
-
-## 📦 Dependencies
-
-### Runtime
-- `bleak>=0.21.0` - BLE communication
-- `bleak-retry-connector>=3.1.0` - Connection reliability (if needed)
-
-### Development
-- `pytest>=7.4.0` - Testing framework
-- `pytest-asyncio>=0.21.0` - Async test support
-- `black>=23.0.0` - Code formatting
-- `ruff>=0.1.0` - Linting
-- `mypy>=1.5.0` - Type checking
-
-## 🎓 Learning Resources
-
-### For Users
-- [Quick Start Guide](QUICKSTART.md)
-- [Example Automations](examples/automations.yaml)
-- [Dashboard Configurations](examples/dashboard.yaml)
-
-### For Developers
-- [Contributing Guide](CONTRIBUTING.md)
-- [CosoriKettleBLE ESPHome](https://github.com/barrymichels/CosoriKettleBLE)
-- [HA Developer Docs](https://developers.home-assistant.io/)
-
-## 🐛 Known Limitations
-
-1. **Single Connection**: Kettle supports only one BLE connection at a time
-2. **Temperature Fluctuation**: ±3°F (±1.5°C) around setpoint during keep-warm
-3. **On-Base Required**: Heating only works when kettle is on charging base
-4. **BLE Range**: Limited by Bluetooth range (use proxies for extended range)
-
-## 🏆 Achievements
-
-- ✅ Complete Python BLE library implementation
-- ✅ Full Home Assistant integration with all required platforms
-- ✅ Comprehensive documentation and examples
-- ✅ HACS compatible structure
-- ✅ Prepared for HA core submission
-- ✅ Git repository initialized with proper commit
-
-## 📝 Version History
-
-### v0.1.0 (Initial Release)
-- Initial implementation
-- Water heater platform with temperature control
-- Sensor and binary sensor platforms
-- Bluetooth discovery via config flow
-- Complete documentation
-- Example automations and dashboards
-
----
-
-**Status**: ✅ Ready for Testing
-
-**Next Milestone**: User testing and feedback collection
-
-**Future Plans**:
-- Unit and integration tests
-- PyPI package publication
-- HA core submission
-- Community feedback integration
+Black, Ruff, library MyPy checks, and standalone wheel contents are checked alongside the suite. Automated transport is a test double, not a physical kettle. A real kettle and actual Bluetooth adapter/proxy still need the [hardware checks](README.md#hardware-verification). No live Home Assistant deployment or ESP32 flashing was performed.
