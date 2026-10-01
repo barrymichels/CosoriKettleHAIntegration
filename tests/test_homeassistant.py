@@ -125,6 +125,47 @@ async def test_disconnect_staged_target_and_unload(hass, entry, kettle_client):
     kettle_client.disconnect.assert_awaited_once()
 
 
+async def test_status_poll_publishes_entities_and_recovers_availability(
+    hass, entry, kettle_client
+):
+    from homeassistant.helpers.update_coordinator import UpdateFailed
+
+    coordinator = entry.runtime_data
+    entity_ids = (
+        "water_heater.cosori_kettle",
+        "sensor.cosori_kettle_current_temperature",
+        "binary_sensor.cosori_kettle_on_base",
+        "binary_sensor.cosori_kettle_heating",
+    )
+    kettle_client.target = 185
+    kettle_client.heating = True
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert all(
+        hass.states.get(entity_id).state != STATE_UNAVAILABLE
+        for entity_id in entity_ids
+    )
+    assert hass.states.get("water_heater.cosori_kettle").state == "on"
+    assert hass.states.get("binary_sensor.cosori_kettle_heating").state == "on"
+
+    coordinator.async_set_update_error(UpdateFailed("Temporary transport failure"))
+    await hass.async_block_till_done()
+    assert all(
+        hass.states.get(entity_id).state == STATE_UNAVAILABLE
+        for entity_id in entity_ids
+    )
+
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert coordinator.last_update_success is True
+    assert all(
+        hass.states.get(entity_id).state != STATE_UNAVAILABLE
+        for entity_id in entity_ids
+    )
+    assert hass.states.get("water_heater.cosori_kettle").state == "on"
+    assert hass.states.get("binary_sensor.cosori_kettle_heating").state == "on"
+
+
 async def test_validation_error_preserves_device_availability(hass, entry):
     coordinator = entry.runtime_data
     with pytest.raises(ServiceValidationError):
