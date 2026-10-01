@@ -43,4 +43,6 @@ Entity unique IDs remain based on the existing entry ID. The selected target is 
 
 The regression suite covers literal ESPHome packet bytes and real status captures, framing/checksum failures, immediate fragmented responses, serialized start/stop transactions, timeout cleanup, temperature validation, custom handshakes, actual Home Assistant platform setup and service dispatch, config-flow probing/duplicates, unavailable states, reconnect routing, and lifecycle cleanup.
 
-Black, Ruff, library MyPy checks, and standalone wheel contents are checked alongside the suite. Automated transport is a test double, not a physical kettle. A real kettle and actual Bluetooth adapter/proxy still need the [hardware checks](README.md#hardware-verification). No live Home Assistant deployment or ESP32 flashing was performed.
+All 31 regression tests pass against Home Assistant 2026.9.4. Black, Ruff, library MyPy checks, and standalone wheel contents are checked alongside the suite. Automated transport is a test double, not a physical kettle.
+
+On October 1, 2026, the project owner reported successful setup with a physical kettle after converting the old ESP32 to an active Bluetooth Proxy, connecting its ESPHome API to Home Assistant, and restarting Home Assistant with the integration files present. This confirms setup in that environment; the remaining control and recovery behavior still needs the [hardware checks](README.md#hardware-verification). Live installation and flashing were performed by the owner, separately from the automated tests.

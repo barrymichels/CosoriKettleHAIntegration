@@ -9,7 +9,7 @@ Control a Cosori BLE kettle through Home Assistant's Bluetooth integration, usin
 - A compatible Cosori BLE kettle within Bluetooth range.
 - The old ESPHome kettle client and VeSync/Cosori app must release their connections. The kettle permits only one BLE connection.
 
-This remains a custom integration. Automated tests use simulated BLE hardware; operation with a physical kettle and proxy still needs verification. See [PROJECT_SUMMARY.md](PROJECT_SUMMARY.md) for the comparison and validation scope.
+This remains a custom integration. Successful setup with a physical kettle through an ESPHome Bluetooth Proxy was reported on October 1, 2026. Automated tests use simulated BLE hardware; the remaining control and recovery checks are listed under [Hardware verification](#hardware-verification). See [PROJECT_SUMMARY.md](PROJECT_SUMMARY.md) for the comparison and validation scope.
 
 ## Switching from CosoriKettleBLE
 
@@ -41,9 +41,9 @@ mkdir -p /config/custom_components
 cp -r custom_components/cosori_kettle /config/custom_components/
 ```
 
-The result must include `/config/custom_components/cosori_kettle/manifest.json` and the bundled `cosori_kettle_ble/` directory. Restart Home Assistant. No separate pip installation of the library is needed for Home Assistant.
+The result must include `/config/custom_components/cosori_kettle/manifest.json`, `__init__.py`, `config_flow.py`, and the bundled `cosori_kettle_ble/` directory. Restart Home Assistant **after copying the files**, then refresh the browser and search for **Cosori Kettle** under **Settings → Devices & services → Add integration**. Restarting while the folder is absent and copying it back afterward requires another restart. No separate pip installation of the library is needed for Home Assistant.
 
-A HACS custom-repository installation can be used once the updated code is published to the repository. It is not part of the default HACS catalog.
+For HACS installation, the updated code must first be pushed to a **public** GitHub repository. HACS cannot install private repositories. Once public, open **HACS → ⋮ → Custom repositories**, enter `https://github.com/barrymichels/CosoriKettleHAIntegration`, select **Integration**, and add it. Download **Cosori Kettle**, restart Home Assistant, then add the integration as above. It is not part of the default HACS catalog. See the [HACS custom repository instructions](https://www.hacs.xyz/docs/faq/custom_repositories/) and [private repository limitation](https://www.hacs.xyz/docs/faq/private_repositories/).
 
 ## Entities and controls
 
@@ -55,7 +55,7 @@ A HACS custom-repository installation can be used once the updated code is publi
 | `binary_sensor.cosori_kettle_on_base` | Whether the kettle is on its base |
 | `binary_sensor.cosori_kettle_heating` | Heating status reported by the kettle |
 
-Actual entity IDs depend on the device name and existing registry entries. Targets range from 40–100°C / 104–212°F, with integer Fahrenheit steps on the wire. Home Assistant displays and accepts temperatures in its configured unit system.
+Actual entity IDs depend on the device name and existing registry entries. Targets range from 40–100°C / 104–212°F, with integer Fahrenheit steps on the wire. Home Assistant displays and accepts water heater temperatures in its configured unit system. Check the entity ID and the water heater's `temperature_unit`, `temperature`, and `current_temperature` attributes under **Settings → Tools → States** before adapting examples. Temperature sensors can have separate display-unit overrides.
 
 Setting a temperature while off stages the target without starting heating, as in the ESPHome version. Turning on applies that target. Changing the target while heating applies it immediately. Include `operation_mode: "on"` to set a target and start in one action:
 
@@ -94,7 +94,9 @@ entities:
   - binary_sensor.cosori_kettle_heating
 ```
 
-Home Assistant's thermostat card requires a climate entity. This integration exposes a water heater. See [examples/dashboard.yaml](examples/dashboard.yaml) and [examples/automations.yaml](examples/automations.yaml) for additional examples.
+Home Assistant's thermostat card requires a climate entity. This integration exposes a water heater. See [examples/dashboard.yaml](examples/dashboard.yaml) for additional cards; each document separated by `---` is a separate card to paste into the dashboard editor. Those examples use Celsius; convert their temperature values if your Home Assistant uses Fahrenheit. The target-temperature sensor is disabled by default; enable it on the device's entity page if you want to display it.
+
+[examples/automations.yaml](examples/automations.yaml) contains independent examples for `automations.yaml`. To use the UI automation editor, copy one example without its outer list marker. Check entity IDs and temperature units, and create the documented helpers before enabling examples that depend on them. Notifications appear in Home Assistant; replace `persistent_notification.create` with your actual phone notification action if desired.
 
 For Mushroom preset buttons, use [examples/dashboard-presets.yaml](examples/dashboard-presets.yaml). It provides Black Tea (212°F), Matcha (155°F), Coffee (185°F), and Off buttons with live temperatures and heating colors. This example requires Fahrenheit temperatures in Home Assistant; adjust the entity ID if necessary. It calls the water heater directly, so the old ESPHome preset scripts are not needed by these buttons.
 
@@ -116,11 +118,27 @@ Setup distinguishes three failures: no connectable Bluetooth route, a BLE connec
 Enable debug logging when collecting failures:
 
 ```yaml
+# In configuration.yaml; merge into an existing logger section if present.
 logger:
   logs:
     custom_components.cosori_kettle: debug
     bleak_retry_connector: debug
+    bleak_esphome: debug
+    aioesphomeapi: debug
 ```
+
+Restart Home Assistant after changing `configuration.yaml`. To enable the same logging for the current session, open **Settings → Tools → Actions**, select **Go to YAML mode**, paste the following, and select **Perform action**:
+
+```yaml
+action: logger.set_level
+data:
+  custom_components.cosori_kettle: debug
+  bleak_retry_connector: debug
+  bleak_esphome: debug
+  aioesphomeapi: debug
+```
+
+This runs an existing action; no new action needs to be created. If it is unavailable, enable `logger:` in `configuration.yaml` and restart first. Session logging levels reset at restart. Retry setup and collect the raw logs under **Settings → System → Logs**. See [Home Assistant's Logger documentation](https://www.home-assistant.io/integrations/logger/).
 
 ## Development
 

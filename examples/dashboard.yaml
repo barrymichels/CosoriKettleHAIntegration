@@ -1,4 +1,7 @@
 # Example Lovelace dashboard configuration for Cosori Kettle
+# Each document separated by --- is a separate card, not a complete dashboard.
+# Temperature values assume Celsius; convert them for Fahrenheit configurations.
+# Replace entity IDs if yours differ.
 
 # Main controls: open the water heater more-info dialog.
 type: entities
@@ -22,6 +25,7 @@ cards:
       - entity: sensor.cosori_kettle_current_temperature
         name: Current Temperature
       - entity: sensor.cosori_kettle_target_temperature
+        # Disabled by default: enable this diagnostic entity before using it.
         name: Target Temperature
       - entity: binary_sensor.cosori_kettle_on_base
         name: On Base
@@ -106,16 +110,12 @@ cards:
 
 ---
 
-# Advanced card with conditional elements (requires slider-entity-row)
+# Entity card with conditional elements; open the water heater for temperature controls.
 type: entities
 title: Cosori Kettle
 entities:
-  - type: custom:slider-entity-row
-    entity: water_heater.cosori_kettle
-    name: Target Temperature
-    min: 40
-    max: 100
-    step: 5
+  - entity: water_heater.cosori_kettle
+    name: Kettle Controls
 
   - entity: sensor.cosori_kettle_current_temperature
     name: Current Temperature

@@ -1,5 +1,8 @@
 # Temperature values below assume Home Assistant uses Celsius.
 # Example automations for Cosori Kettle Home Assistant Integration
+# Add selected examples to automations.yaml. For the UI editor, copy one
+# automation without its outer list marker. Adjust entity IDs as necessary.
+# Notifications use Home Assistant's built-in persistent notifications.
 
 # Morning coffee - heat to boiling at 7 AM
 - alias: "Morning Coffee"
@@ -41,9 +44,9 @@
       target:
         entity_id: water_heater.cosori_kettle
 
-# Notify when water is ready
+# Notify near boiling; this fixed threshold does not track lower tea presets.
 - alias: "Kettle Ready Notification"
-  description: "Send notification when water reaches target temperature"
+  description: "Send notification when water crosses 96°C while heating"
   trigger:
     - platform: numeric_state
       entity_id: sensor.cosori_kettle_current_temperature
@@ -52,28 +55,23 @@
     - condition: state
       entity_id: binary_sensor.cosori_kettle_heating
       state: "on"
-    # Prevent repeat notifications within 10 minutes
-    - condition: template
-      value_template: >
-        {{ (now() - state_attr('automation.kettle_ready_notification', 'last_triggered') | default(now() - timedelta(minutes=10), true)).total_seconds() > 600 }}
   action:
-    - service: notify.mobile_app
+    - service: persistent_notification.create
       data:
-        message: "Your water is ready!"
+        message: "Your kettle water is near boiling (above 96°C)."
         title: "Kettle"
+        notification_id: kettle_near_boiling
     # Optional: Turn off heating after notification
     # - service: water_heater.turn_off
     #   target:
     #     entity_id: water_heater.cosori_kettle
 
-# Voice assistant trigger
-- alias: "Alexa - Boil Kettle"
-  description: "Start boiling kettle via voice command"
+# Voice command for Home Assistant Assist (English).
+- alias: "Assist - Boil Kettle"
+  description: "Start boiling kettle via Home Assistant Assist"
   trigger:
-    - platform: event
-      event_type: alexa_actionable_notification
-      event_data:
-        event_id: boil_kettle
+    - platform: conversation
+      command: "[please] boil [the] kettle"
   condition:
     - condition: state
       entity_id: binary_sensor.cosori_kettle_on_base
@@ -88,7 +86,8 @@
       target:
         entity_id: water_heater.cosori_kettle
 
-# Auto-stop heating after 30 minutes (safety)
+# Stop after 30 minutes of reported heating. The timer resets on HA restart
+# or automation reload; this is not a replacement for the kettle's safeguards.
 - alias: "Kettle Auto-Stop After 30min"
   description: "Automatically stop heating after 30 minutes to save energy"
   trigger:
@@ -101,12 +100,13 @@
     - service: water_heater.turn_off
       target:
         entity_id: water_heater.cosori_kettle
-    - service: notify.mobile_app
+    - service: persistent_notification.create
       data:
         message: "Kettle has been heating for 30 minutes and was automatically stopped"
         title: "Kettle Auto-Stop"
+        notification_id: kettle_auto_stop
 
-# Temperature-specific presets using input_select
+# Temperature-specific presets; create the input_select helper shown below first.
 - alias: "Kettle Preset Temperature"
   description: "Heat to preset temperature based on input_select"
   trigger:
@@ -117,27 +117,29 @@
       entity_id: binary_sensor.cosori_kettle_on_base
       state: "on"
     - condition: template
-      value_template: "{{ trigger.to_state.state != 'Off' }}"
+      value_template: >
+        {{ trigger.to_state is not none and trigger.to_state.state in
+           ['Off', 'Green Tea (80°C)', 'White Tea (85°C)',
+            'Black Tea (95°C)', 'Coffee (100°C)'] }}
   action:
-    - service: water_heater.set_temperature
-      target:
-        entity_id: water_heater.cosori_kettle
-      data:
-        temperature: >
-          {% if trigger.to_state.state == 'Green Tea (80°C)' %}
-            80
-          {% elif trigger.to_state.state == 'White Tea (85°C)' %}
-            85
-          {% elif trigger.to_state.state == 'Coffee (100°C)' %}
-            100
-          {% elif trigger.to_state.state == 'Black Tea (95°C)' %}
-            95
-          {% else %}
-            100
-          {% endif %}
-    - service: water_heater.turn_on
-      target:
-        entity_id: water_heater.cosori_kettle
+    - choose:
+        - conditions:
+            - condition: template
+              value_template: "{{ trigger.to_state.state == 'Off' }}"
+          sequence:
+            - service: water_heater.turn_off
+              target:
+                entity_id: water_heater.cosori_kettle
+      default:
+        - service: water_heater.set_temperature
+          target:
+            entity_id: water_heater.cosori_kettle
+          data:
+            temperature: >
+              {{ {'Green Tea (80°C)': 80, 'White Tea (85°C)': 85,
+                  'Black Tea (95°C)': 95, 'Coffee (100°C)': 100}
+                 [trigger.to_state.state] }}
+            operation_mode: "on"
 
 # Warn if kettle removed from base while heating
 - alias: "Kettle Removed While Heating"
@@ -152,12 +154,15 @@
       entity_id: binary_sensor.cosori_kettle_heating
       state: "on"
   action:
-    - service: notify.mobile_app
+    - service: persistent_notification.create
       data:
         message: "Kettle was removed from base while heating"
         title: "Kettle Warning"
+        notification_id: kettle_removed
 
-# Daily reminder to descale (every 30 days)
+# Daily reminder once 30 days have elapsed since the stored descale date.
+# Create the input_datetime helper below and set it to the actual date after
+# each descale. The reminder remains active until that date is updated.
 - alias: "Kettle Descale Reminder"
   description: "Remind to descale kettle every 30 days"
   trigger:
@@ -166,12 +171,16 @@
   condition:
     - condition: template
       value_template: >
-        {{ (now() - states.input_datetime.kettle_last_descaled.last_changed).days >= 30 }}
+        {% set last_descaled = as_timestamp(
+             states('input_datetime.kettle_last_descaled'), default=none) %}
+        {{ last_descaled is not none
+           and as_timestamp(now()) - last_descaled >= 30 * 24 * 60 * 60 }}
   action:
-    - service: notify.mobile_app
+    - service: persistent_notification.create
       data:
         message: "Time to descale your Cosori Kettle for optimal performance"
         title: "Kettle Maintenance"
+        notification_id: kettle_descale
 
 # Example input_select for presets (add to configuration.yaml)
 # input_select:

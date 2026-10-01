@@ -15,6 +15,7 @@
     "bluetooth_adapters"
   ],
   "documentation": "https://github.com/barrymichels/CosoriKettleHAIntegration",
+  "issue_tracker": "https://github.com/barrymichels/CosoriKettleHAIntegration/issues",
   "iot_class": "local_polling",
   "loggers": [
     "cosori_kettle_ble"
