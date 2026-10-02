@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import Any
@@ -13,7 +14,7 @@ from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.helpers import selector
 
-from .const import CONF_HANDSHAKE, DOMAIN, SERVICE_UUID
+from .const import CONF_HANDSHAKE, DOMAIN, PROBE_TIMEOUT, SERVICE_UUID
 from .cosori_kettle_ble import CosoriKettleDevice, parse_registration_handshake
 from .cosori_kettle_ble.exceptions import CosoriKettleError
 
@@ -78,18 +79,27 @@ class CosoriKettleConfigFlow(ConfigFlow, domain=DOMAIN):
             return "not_reachable", {}
         device = CosoriKettleDevice(ble_device, handshake=handshake)
         registered = False
+        reason: str | None = None
         try:
-            await device.connect()
-            registered = True
-            await device.update()
+            # Bound the whole probe: start_notify and the handshake writes
+            # rely only on bleak-internal timeouts, which a wedged adapter or
+            # proxy can exceed; the probe deadline must cover them all.
+            async with asyncio.timeout(PROBE_TIMEOUT):
+                await device.connect()
+                registered = True
+                await device.update()
+        except TimeoutError:
+            reason = f"timed out after {PROBE_TIMEOUT}s"
         except CosoriKettleError as err:
-            stage = "reading status" if registered else "connecting/registering"
-            _LOGGER.warning(
-                "Kettle setup failed for %s while %s: %s", address, stage, err
-            )
-            return "no_status" if registered else "cannot_connect", {}
+            reason = str(err)
         finally:
             await device.disconnect()
+        if reason is not None:
+            stage = "reading status" if registered else "connecting/registering"
+            _LOGGER.warning(
+                "Kettle setup failed for %s while %s: %s", address, stage, reason
+            )
+            return "no_status" if registered else "cannot_connect", {}
         entry_data: dict[str, Any] = {CONF_ADDRESS: address}
         if handshake is not None:
             entry_data[CONF_HANDSHAKE] = [packet.hex() for packet in handshake]

@@ -459,6 +459,26 @@ async def test_repeated_poll_failures_back_off(hass, entry):
     assert raised.value.retry_after == 2
 
 
+async def test_successful_command_resets_failure_backoff(hass, entry, kettle_client):
+    """A successful command resets the poll-failure backoff cadence."""
+    from homeassistant.helpers.update_coordinator import UpdateFailed
+
+    coordinator = entry.runtime_data
+    with patch.object(
+        coordinator.device, "update", side_effect=CosoriKettleTimeoutError("gone")
+    ):
+        with pytest.raises(UpdateFailed) as raised:
+            await coordinator._async_update_data()
+        assert raised.value.retry_after == 2
+    await coordinator.async_start_heating()
+    with patch.object(
+        coordinator.device, "update", side_effect=CosoriKettleTimeoutError("gone")
+    ):
+        with pytest.raises(UpdateFailed) as raised:
+            await coordinator._async_update_data()
+        assert raised.value.retry_after == 2
+
+
 async def test_reconnect_resolves_new_proxy_route(
     hass, entry, kettle_client, ble_device
 ):
@@ -496,8 +516,8 @@ async def test_invalid_device_status_cannot_create_entry(
 
     original_wait = CosoriKettleDevice._wait_status
 
-    async def short_wait(self):
-        await original_wait(self, 0.01)
+    async def short_wait(self, require_base: bool = False):
+        await original_wait(self, require_base, timeout=0.01)
 
     kettle_client.respond = False
     kettle_client.respond_poll = False
@@ -514,6 +534,81 @@ async def test_invalid_device_status_cannot_create_entry(
             f"{BLE_MODULE}.establish_connection", AsyncMock(return_value=kettle_client)
         ),
         patch.object(CosoriKettleDevice, "_wait_status", short_wait),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": "user"}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_ADDRESS: ble_device.address}
+        )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "no_status"}
+    assert hass.config_entries.async_entries(DOMAIN) == []
+    kettle_client.disconnect.assert_awaited_once()
+
+
+async def test_probe_deadline_binds_a_hanging_subscription(
+    hass, ble_device, kettle_client, monkeypatch
+):
+    """A wedged start_notify must hit the probe deadline, not the dialog."""
+    from custom_components.cosori_kettle import config_flow
+
+    async def hang_notify(*args, **kwargs):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(config_flow, "PROBE_TIMEOUT", 0.05)
+    kettle_client.start_notify = hang_notify
+    with (
+        patch(
+            "homeassistant.components.bluetooth.async_discovered_service_info",
+            return_value=[],
+        ),
+        patch(
+            "homeassistant.components.bluetooth.async_ble_device_from_address",
+            return_value=ble_device,
+        ),
+        patch(
+            f"{BLE_MODULE}.establish_connection", AsyncMock(return_value=kettle_client)
+        ),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": "user"}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_ADDRESS: ble_device.address}
+        )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "cannot_connect"}
+    assert hass.config_entries.async_entries(DOMAIN) == []
+    kettle_client.disconnect.assert_awaited_once()
+
+
+async def test_probe_deadline_binds_a_hanging_status_read(
+    hass, ble_device, kettle_client, monkeypatch
+):
+    """A wedged post-registration status read must hit the probe deadline."""
+    from custom_components.cosori_kettle import config_flow
+    from custom_components.cosori_kettle.cosori_kettle_ble.device import (
+        CosoriKettleDevice,
+    )
+
+    async def hang_wait(self, *args, **kwargs):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(config_flow, "PROBE_TIMEOUT", 1.0)
+    with (
+        patch(
+            "homeassistant.components.bluetooth.async_discovered_service_info",
+            return_value=[],
+        ),
+        patch(
+            "homeassistant.components.bluetooth.async_ble_device_from_address",
+            return_value=ble_device,
+        ),
+        patch(
+            f"{BLE_MODULE}.establish_connection", AsyncMock(return_value=kettle_client)
+        ),
+        patch.object(CosoriKettleDevice, "_wait_status", hang_wait),
     ):
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": "user"}

@@ -43,6 +43,9 @@ CONNECT_TIMEOUT = 30.0
 COMMAND_CONNECT_TIMEOUT = 10.0
 DISCONNECT_TIMEOUT = 5.0
 STATUS_TIMEOUT = 5.0
+# A base-dependent poll must not consume the caller's whole command budget
+# waiting for an extended frame a compact-only stream never sends.
+BASE_STATUS_TIMEOUT = 10.0
 DISCONNECT_LOCK_TIMEOUT = 5.0
 
 
@@ -299,20 +302,33 @@ class CosoriKettleDevice:
                 f"Could not write command: {err}"
             ) from err
 
-    async def _wait_status(self, timeout: float = STATUS_TIMEOUT) -> None:
+    async def _wait_status(
+        self, require_base: bool = False, timeout: float = STATUS_TIMEOUT
+    ) -> None:
         try:
             await asyncio.wait_for(self._notification_event.wait(), timeout)
         except TimeoutError as err:
             await self._disconnect()
             raise CosoriKettleTimeoutError(
-                f"No valid kettle status received from {self.address} "
-                f"({self._notifications_received} BLE notifications "
-                "received during poll)"
+                self._status_timeout_message(require_base)
             ) from err
         if not self.is_connected or self._status is None:
             raise CosoriKettleConnectionError(
                 "Kettle disconnected while awaiting status"
             )
+
+    def _status_timeout_message(self, require_base: bool) -> str:
+        """Name the frame a timed-out poll was waiting for."""
+        missing = (
+            "extended status (with the base field)"
+            if require_base
+            else "valid kettle status"
+        )
+        return (
+            f"No {missing} received from {self.address} "
+            f"({self._notifications_received} BLE notifications "
+            "received during poll)"
+        )
 
     async def _poll(self, require_base: bool = False) -> None:
         _LOGGER.debug("Kettle %s: requesting fresh status", self.address)
@@ -320,14 +336,26 @@ class CosoriKettleDevice:
         self._base_received = False
         self._notification_event.clear()
         await self._send_command(self._protocol.build_poll())
-        while True:
-            await self._wait_status()
-            # A compact status carries no base field, so a base-dependent
-            # decision must see an extended frame during this poll. Track it
-            # on receipt: a later compact frame overwrites the latest status.
-            if not require_base or self._base_received:
-                return
-            self._notification_event.clear()
+        timeout = BASE_STATUS_TIMEOUT if require_base else None
+        try:
+            async with asyncio.timeout(timeout):
+                # A compact status carries no base field, so a base-dependent
+                # decision must see an extended frame during this poll. Track
+                # it on receipt: a later compact frame overwrites the latest
+                # status.
+                while True:
+                    await self._wait_status(require_base)
+                    if not require_base or self._base_received:
+                        return
+                    self._notification_event.clear()
+        except TimeoutError as err:
+            # The bounded base-wait expired, so the required extended frame
+            # never arrived: report it instead of claiming an unconfirmed
+            # write at the caller's deadline.
+            await self._disconnect()
+            raise CosoriKettleTimeoutError(
+                self._status_timeout_message(require_base)
+            ) from err
 
     async def update(
         self,

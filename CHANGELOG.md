@@ -1,6 +1,24 @@
 # Changelog
 
 ## Unreleased
+- Config flow setup now bounds the whole probe (`PROBE_TIMEOUT`, 60 s): a
+  wedged adapter or proxy stuck in `start_notify` or the handshake writes
+  previously could hang the setup dialog past every internal deadline. A
+  timed-out probe keeps the `cannot_connect`/`no_status` distinction and
+  cleanup stays bounded.
+- Successful control commands reset the poll-failure backoff cadence, so a
+  recovered kettle is retried at the normal interval instead of an
+  inflated one.
+- The coordinator's dead raw `TimeoutError` handler was removed: the device
+  already converts every timeout to `CosoriKettleTimeoutError`.
+- A base-dependent poll now bounds its wait for an extended frame
+  (`BASE_STATUS_TIMEOUT`, 10 s) instead of consuming the caller's whole
+  command budget. A compact-only stream reports "No extended status (with
+  the base field) received" — with no heating command written — instead of
+  an "outcome is unconfirmed" error that implied a write had happened.
+- The `on_base` binary sensor no longer uses the `CONNECTIVITY` device
+  class, which rendered a physical on-base state as a network connection
+  state.
 
 - A temperature-only request now fetches a fresh extended status before
   deciding whether to start heating. Cached heating state from before a

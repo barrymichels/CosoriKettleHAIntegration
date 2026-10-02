@@ -28,7 +28,6 @@ class CosoriKettleBinarySensorEntityDescription(BinarySensorEntityDescription):
 BINARY_SENSORS: tuple[CosoriKettleBinarySensorEntityDescription, ...] = (
     CosoriKettleBinarySensorEntityDescription(
         key="on_base",
-        device_class=BinarySensorDeviceClass.CONNECTIVITY,
         value_fn=lambda coordinator: coordinator.on_base,
         entity_registry_enabled_default=True,
     ),

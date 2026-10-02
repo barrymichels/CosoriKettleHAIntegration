@@ -112,10 +112,6 @@ class CosoriKettleDataUpdateCoordinator(DataUpdateCoordinator[None]):
             poll.cancel()
             await asyncio.gather(poll, return_exceptions=True)
             raise
-        except TimeoutError as err:
-            raise self._update_failed(
-                f"Status transaction did not finish within {POLL_TIMEOUT}s"
-            ) from err
         except CosoriKettleError as err:
             raise self._update_failed(str(err)) from err
         self._consecutive_failures = 0
@@ -180,7 +176,10 @@ class CosoriKettleDataUpdateCoordinator(DataUpdateCoordinator[None]):
         command.add_done_callback(self._command_tasks.discard)
         try:
             async with asyncio.timeout(COMMAND_TIMEOUT):
-                return await asyncio.shield(command)
+                result = await asyncio.shield(command)
+            # Successful communication resets the backoff cadence.
+            self._consecutive_failures = 0
+            return result
         except asyncio.CancelledError:
             command.cancel()
             await asyncio.gather(command, return_exceptions=True)

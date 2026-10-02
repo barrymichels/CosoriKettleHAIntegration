@@ -89,8 +89,8 @@ async def test_status_timeout_disconnects(device, kettle_client):
     kettle_client.respond_poll = False
     original = device._wait_status
 
-    async def short_wait():
-        await original(0.01)
+    async def short_wait(require_base: bool = False):
+        await original(require_base, timeout=0.01)
 
     with patch.object(device, "_wait_status", side_effect=short_wait):
         with pytest.raises(CosoriKettleTimeoutError):
@@ -216,8 +216,8 @@ async def test_unconfirmed_command_reports_the_outcome(device, kettle_client):
     kettle_client.poll_responses_left = 1
     original = device._wait_status
 
-    async def short_wait():
-        await original(0.01)
+    async def short_wait(require_base: bool = False):
+        await original(require_base, timeout=0.01)
 
     with patch.object(device, "_wait_status", side_effect=short_wait):
         with pytest.raises(CosoriKettleUnconfirmedError) as raised:
@@ -319,8 +319,8 @@ async def test_written_but_unconfirmed_target_is_superseded_by_the_kettle(
     kettle_client.poll_responses_left = 1
     original = device._wait_status
 
-    async def short_wait():
-        await original(0.01)
+    async def short_wait(require_base: bool = False):
+        await original(require_base, timeout=0.01)
 
     with patch.object(device, "_wait_status", side_effect=short_wait):
         with pytest.raises(CosoriKettleUnconfirmedError):
@@ -407,6 +407,59 @@ async def test_compact_followup_does_not_lose_fresh_base_status(device, kettle_c
     kettle_client.status = respond_with_extended_then_compact
     await device.start_heating()
     assert device.heating is True
+
+
+async def test_start_heating_without_fresh_base_sends_nothing(device, kettle_client):
+    """Compact-only notifications carry no base field: the heating decision
+    must fail with no heating command written."""
+    original = device._wait_status
+
+    async def short_wait(require_base: bool = False):
+        await original(require_base, timeout=0.01)
+
+    def compact():
+        kettle_client.notify(None, COMPACT[:10])
+        kettle_client.notify(None, COMPACT[10:])
+
+    kettle_client.status = compact
+    await device.update()
+    assert device.current_temp_f == 100
+    assert device.on_base is None
+    kettle_client.writes.clear()
+    with patch.object(device, "_wait_status", side_effect=short_wait):
+        with pytest.raises(CosoriKettleTimeoutError, match="extended status"):
+            await device.start_heating()
+    assert kettle_client.writes[-1][6:10].hex() == "00404000"
+    assert kettle_client.heating is False
+    assert device.on_base is None
+
+
+async def test_compact_only_stream_hits_the_bounded_base_wait(
+    device, kettle_client, monkeypatch
+):
+    """Compact frames that keep arriving must hit the bounded base-wait, not
+    the caller's deadline: no heating command is written."""
+    monkeypatch.setattr("cosori_kettle_ble.device.BASE_STATUS_TIMEOUT", 0.01)
+
+    async def stream():
+        while True:
+            if kettle_client.notify is not None:
+                kettle_client.notify(None, COMPACT)
+            await asyncio.sleep(0.001)
+
+    kettle_client.respond = False
+    kettle_client.respond_poll = False
+    producer = asyncio.create_task(stream())
+    try:
+        async with asyncio.timeout(2.0):
+            with pytest.raises(CosoriKettleTimeoutError, match="extended status"):
+                await device.start_heating()
+    finally:
+        producer.cancel()
+        await asyncio.gather(producer, return_exceptions=True)
+    assert kettle_client.writes[-1][6:10].hex() == "00404000"
+    assert kettle_client.heating is False
+    assert device.on_base is None
 
 
 async def test_connect_deadline_binds_regardless_of_the_connector(ble_device):

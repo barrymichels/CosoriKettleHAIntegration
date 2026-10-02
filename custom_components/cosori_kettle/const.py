@@ -16,6 +16,7 @@ UPDATE_INTERVAL: Final = 2  # seconds
 POLL_TIMEOUT: Final = 15.0  # whole poll, including reconnection
 POLL_CONNECT_TIMEOUT: Final = 8.0  # a single poll's connection attempt
 COMMAND_TIMEOUT: Final = 30.0  # whole control transaction, including verification
+PROBE_TIMEOUT: Final = 60.0  # whole config-flow probe, connect through status
 
 # BLE service UUID for discovery
 SERVICE_UUID: Final = _SERVICE_UUID
