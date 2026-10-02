@@ -57,7 +57,7 @@ For HACS installation, the updated code must first be pushed to a **public** Git
 
 Actual entity IDs depend on the device name and existing registry entries. Targets range from 40–100°C / 104–212°F, with integer Fahrenheit steps on the wire. Home Assistant displays and accepts water heater temperatures in its configured unit system. Check the entity ID and the water heater's `temperature_unit`, `temperature`, and `current_temperature` attributes under **Settings → Tools → States** before adapting examples. Temperature sensors can have separate display-unit overrides.
 
-Setting a temperature while off stages the target without starting heating, as in the ESPHome version. Turning on applies that target. Changing the target while heating applies it immediately. Include `operation_mode: "on"` to set a target and start in one action:
+Setting a temperature while off stages the target without starting heating, as in the ESPHome version. Turning on applies that target. Changing the target while heating applies it immediately. A staged target is what the entities show until the kettle echoes that setpoint back; after that, the reported target follows the kettle, so a setpoint changed on the kettle itself is reflected. Include `operation_mode: "on"` to set a target and start in one action:
 
 ```yaml
 action: water_heater.set_temperature
@@ -78,7 +78,7 @@ target:
 
 Keep-warm behavior is controlled by the kettle firmware. This integration sends the same boil/custom mode and start/stop transactions as the working ESPHome component; it does not implement a separate keep-warm timer.
 
-The water heater becomes unavailable off-base. Its sensors continue reporting off-base status while the BLE connection is alive. Communication failures mark all entities unavailable, and the next poll retries the connection through Home Assistant's current adapter/proxy route.
+The water heater becomes unavailable off-base. Its sensors continue reporting off-base status while the BLE connection is alive. Communication failures mark all entities unavailable, and the next poll retries the connection through Home Assistant's current adapter/proxy route. Each poll and control transaction has a fixed deadline, and the connection cleanup that follows a deadline is itself bounded to 5 seconds, so a stuck transport cannot stall the refresh loop indefinitely. If a start or stop command was written but the kettle then reported no status, the action raises an error saying the outcome is unconfirmed rather than claiming success.
 
 ## Dashboard
 

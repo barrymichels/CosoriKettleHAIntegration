@@ -20,6 +20,7 @@ from .cosori_kettle_ble.exceptions import CosoriKettleError
 _LOGGER = logging.getLogger(__name__)
 
 HANDSHAKE_FIELDS = ("handshake_1", "handshake_2", "handshake_3")
+MAC_PATTERN = re.compile(r"(?:[0-9A-F]{2}:){5}[0-9A-F]{2}")
 
 
 class CosoriKettleConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -49,8 +50,8 @@ class CosoriKettleConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def _validate_device(
         self, address: str, user_input: dict[str, Any]
-    ) -> str | None:
-        """Probe without heating, and release the connection even on cancellation."""
+    ) -> tuple[str | None, dict[str, Any]]:
+        """Probe without heating; return (error key, entry data)."""
         try:
             values = [user_input.get(field, "").strip() for field in HANDSHAKE_FIELDS]
             handshake = (
@@ -59,9 +60,9 @@ class CosoriKettleConfigFlow(ConfigFlow, domain=DOMAIN):
                 else None
             )
             if handshake is not None and any(not packet for packet in handshake):
-                return "invalid_handshake"
+                return "invalid_handshake", {}
         except ValueError:
-            return "invalid_handshake"
+            return "invalid_handshake", {}
         ble_device = bluetooth.async_ble_device_from_address(
             self.hass, address, connectable=True
         )
@@ -72,7 +73,7 @@ class CosoriKettleConfigFlow(ConfigFlow, domain=DOMAIN):
             _LOGGER.warning(
                 "No Bluetooth connection route for %s: %s", address, details
             )
-            return "not_reachable"
+            return "not_reachable", {}
         device = CosoriKettleDevice(ble_device, handshake=handshake)
         registered = False
         try:
@@ -84,13 +85,13 @@ class CosoriKettleConfigFlow(ConfigFlow, domain=DOMAIN):
             _LOGGER.warning(
                 "Kettle setup failed for %s while %s: %s", address, stage, err
             )
-            return "no_status" if registered else "cannot_connect"
+            return "no_status" if registered else "cannot_connect", {}
         finally:
             await device.disconnect()
-        self._entry_data = {CONF_ADDRESS: address}
+        entry_data: dict[str, Any] = {CONF_ADDRESS: address}
         if handshake is not None:
-            self._entry_data[CONF_HANDSHAKE] = [packet.hex() for packet in handshake]
-        return None
+            entry_data[CONF_HANDSHAKE] = [packet.hex() for packet in handshake]
+        return None, entry_data
 
     async def async_step_bluetooth_confirm(
         self, user_input: dict[str, Any] | None = None
@@ -98,14 +99,15 @@ class CosoriKettleConfigFlow(ConfigFlow, domain=DOMAIN):
         assert self._discovery_info is not None
         errors: dict[str, str] = {}
         if user_input is not None:
-            if error := await self._validate_device(
+            error, entry_data = await self._validate_device(
                 self._discovery_info.address.upper(), user_input
-            ):
+            )
+            if error:
                 errors["base"] = error
             else:
                 return self.async_create_entry(
                     title=self._discovery_info.name or "Cosori Kettle",
-                    data=self._entry_data,
+                    data=entry_data,
                 )
         self._set_confirm_only()
         return self.async_show_form(
@@ -123,18 +125,19 @@ class CosoriKettleConfigFlow(ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         if user_input is not None:
             address = user_input[CONF_ADDRESS].strip().upper()
-            if not re.fullmatch(r"(?:[0-9A-F]{2}:){5}[0-9A-F]{2}", address):
+            if not MAC_PATTERN.fullmatch(address):
                 errors[CONF_ADDRESS] = "invalid_address"
             else:
                 await self.async_set_unique_id(address)
                 self._abort_if_unique_id_configured()
-                if error := await self._validate_device(address, user_input):
+                error, entry_data = await self._validate_device(address, user_input)
+                if error:
                     errors["base"] = error
                 else:
                     info = self._discovered_devices.get(address)
                     return self.async_create_entry(
                         title=(info.name if info else None) or "Cosori Kettle",
-                        data=self._entry_data,
+                        data=entry_data,
                     )
         current_addresses = self._async_current_ids()
         self._discovered_devices = {
@@ -148,10 +151,10 @@ class CosoriKettleConfigFlow(ConfigFlow, domain=DOMAIN):
         address_selector = selector.SelectSelector(
             selector.SelectSelectorConfig(
                 options=[
-                    {
-                        "value": address,
-                        "label": f"{info.name or 'BLE device'} ({address})",
-                    }
+                    selector.SelectOptionDict(
+                        value=address,
+                        label=f"{info.name or 'BLE device'} ({address})",
+                    )
                     for address, info in self._discovered_devices.items()
                 ],
                 custom_value=True,

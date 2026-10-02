@@ -1,23 +1,26 @@
 """Constants for Cosori Kettle BLE protocol."""
 
-from uuid import UUID
-
 # BLE Service and Characteristic UUIDs
-SERVICE_UUID = UUID("0000fff0-0000-1000-8000-00805f9b34fb")
-RX_CHAR_UUID = UUID("0000fff1-0000-1000-8000-00805f9b34fb")  # Notifications
-TX_CHAR_UUID = UUID("0000fff2-0000-1000-8000-00805f9b34fb")  # Write
+SERVICE_UUID = "0000fff0-0000-1000-8000-00805f9b34fb"
+RX_CHAR_UUID = "0000fff1-0000-1000-8000-00805f9b34fb"  # Notifications
+TX_CHAR_UUID = "0000fff2-0000-1000-8000-00805f9b34fb"  # Write
 
 # Packet frame types
 FRAME_TYPE_COMPACT = 0x22  # Compact status (12-byte payload)
 FRAME_TYPE_EXTENDED = 0x12  # Extended status (29-byte payload)
 
-# Temperature limits (Fahrenheit)
-MIN_TEMP_F = 104
-MAX_TEMP_F = 212
+# Packet structure
+PACKET_HEADER = 0xA5
+
+# Setpoint limits the kettle accepts, in the Fahrenheit wire unit
+MIN_SETPOINT_F = 104
+MAX_SETPOINT_F = 212
+
+# Plausible temperature readings, used to reject corrupt status frames
 MIN_VALID_READING_F = 40
 MAX_VALID_READING_F = 230
 
-# Temperature limits (Celsius)
+# Temperature limits exposed to Home Assistant (Celsius)
 MIN_TEMP_C = 40
 MAX_TEMP_C = 100
 
@@ -25,18 +28,9 @@ MAX_TEMP_C = 100
 MODE_BOIL = 0x04  # 212°F / 100°C
 MODE_CUSTOM = 0x06  # Other temperatures
 
-# Heating stages
-STAGE_IDLE = 0x00
-# Non-zero stages indicate active heating
-
-# On-base detection
-ON_BASE = 0x00
-OFF_BASE = 0x01
-
-# Packet structure
-PACKET_HEADER = 0xA5
-PACKET_MIN_LENGTH = 6
-
-# Delays (milliseconds)
-HELLO_DELAY_MS = 80
-COMMAND_DELAY_MS = 100
+# Command pacing, matching the working C++ implementation
+HANDSHAKE_DELAY_S = 0.08
+HELLO5_DELAY_S = 0.06
+SETPOINT_GAP_DELAY_S = 0.1
+STATUS_CONFIRM_TIMEOUT_S = 2.0
+CTRL_DELAY_S = 0.05

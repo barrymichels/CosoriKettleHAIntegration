@@ -72,3 +72,15 @@ def test_sequences_wrap_like_esphome():
     sequences = [protocol.build_poll()[2] for _ in range(257)]
     assert sequences[:2] == [1, 2]
     assert sequences[-3:] == [255, 0, 1]
+
+
+def test_setpoint_outside_the_command_range_is_not_a_target():
+    """A setpoint the integration could never write must not become its target."""
+    packet = bytearray(ON_BASE)
+    packet[12] = 80
+    packet[5] = CosoriProtocol._calculate_checksum(bytes(packet[:5] + packet[6:]))
+    status = CosoriProtocol().parse_status(bytes(packet))
+    assert status is not None
+    assert status.target_temp_f is None
+    assert status.current_temp_f == 92
+    assert status.on_base is True

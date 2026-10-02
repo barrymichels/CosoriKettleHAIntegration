@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -12,22 +11,18 @@ from homeassistant.components.binary_sensor import (
     BinarySensorEntityDescription,
 )
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from . import CosoriKettleConfigEntry
-from .const import DOMAIN, MANUFACTURER, MODEL
+from . import CosoriKettleConfigEntry, kettle_device_info
 from .coordinator import CosoriKettleDataUpdateCoordinator
 
-_LOGGER = logging.getLogger(__name__)
 
-
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class CosoriKettleBinarySensorEntityDescription(BinarySensorEntityDescription):
     """Describes Cosori Kettle binary sensor entity."""
 
-    value_fn: Callable[[CosoriKettleDataUpdateCoordinator], bool | None] | None = None
+    value_fn: Callable[[CosoriKettleDataUpdateCoordinator], bool | None]
 
 
 BINARY_SENSORS: tuple[CosoriKettleBinarySensorEntityDescription, ...] = (
@@ -51,7 +46,7 @@ BINARY_SENSORS: tuple[CosoriKettleBinarySensorEntityDescription, ...] = (
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: CosoriKettleConfigEntry,
-    async_add_entities: AddEntitiesCallback,
+    async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up Cosori Kettle binary sensors from a config entry."""
     coordinator: CosoriKettleDataUpdateCoordinator = entry.runtime_data
@@ -79,17 +74,9 @@ class CosoriKettleBinarySensor(
         super().__init__(coordinator)
         self.entity_description = description
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, entry.entry_id)},
-            "connections": {(CONNECTION_BLUETOOTH, coordinator.device.address)},
-            "name": entry.title,
-            "manufacturer": MANUFACTURER,
-            "model": MODEL,
-        }
+        self._attr_device_info = kettle_device_info(entry, coordinator.device.address)
 
     @property
     def is_on(self) -> bool | None:
-        """Return the state of the binary sensor."""
-        if self.entity_description.value_fn is None:
-            return False
+        """Return if the binary sensor is on."""
         return self.entity_description.value_fn(self.coordinator)

@@ -11,3 +11,7 @@ class CosoriKettleConnectionError(CosoriKettleError):
 
 class CosoriKettleTimeoutError(CosoriKettleError):
     """Exception for timeout errors."""
+
+
+class CosoriKettleUnconfirmedError(CosoriKettleError):
+    """Command was written, but the kettle never reported the resulting status."""

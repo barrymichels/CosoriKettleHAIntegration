@@ -5,8 +5,13 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from bleak.exc import BleakError
+from conftest import KettleClient
 from cosori_kettle_ble.device import CosoriKettleDevice
-from cosori_kettle_ble.exceptions import CosoriKettleError, CosoriKettleTimeoutError
+from cosori_kettle_ble.exceptions import (
+    CosoriKettleError,
+    CosoriKettleTimeoutError,
+    CosoriKettleUnconfirmedError,
+)
 
 
 @pytest.fixture
@@ -76,6 +81,7 @@ async def test_poll_cannot_interleave_start_sequence(device, kettle_client):
 async def test_status_timeout_disconnects(device, kettle_client):
     await device.update()
     kettle_client.respond = False
+    kettle_client.respond_poll = False
     original = device._wait_status
 
     async def short_wait():
@@ -166,4 +172,127 @@ async def test_cancelled_subscription_releases_client(ble_device, kettle_client)
         with pytest.raises(asyncio.CancelledError):
             await task
     kettle_client.disconnect.assert_awaited_once()
+    assert device.is_connected is False
+
+
+async def test_reported_target_follows_the_kettle(device, kettle_client):
+    """A setpoint changed on the kettle must not latch behind the first read."""
+    await device.update()
+    assert device.target_temp_f == 212
+
+    kettle_client.target = 185
+    await device.update()
+    assert device.target_temp_f == 185
+
+
+async def test_staged_target_is_retired_once_confirmed(device, kettle_client):
+    """Staging shows an unwritten target, but confirmation hands control back."""
+    await device.update()
+    assert await device.set_target_temperature(80) is False
+    assert device.target_temp_f == 176
+    assert kettle_client.target == 212
+
+    await device.start_heating()
+    assert kettle_client.target == 176
+    assert device.target_temp_f == 176
+
+    kettle_client.target = 185
+    await device.update()
+    assert device.target_temp_f == 185
+
+
+async def test_unconfirmed_command_reports_the_outcome(device, kettle_client):
+    """A written command with no follow-up status must not be called a failure."""
+    await device.update()
+    kettle_client.respond_poll = False
+    original = device._wait_status
+
+    async def short_wait():
+        await original(0.01)
+
+    with patch.object(device, "_wait_status", side_effect=short_wait):
+        with pytest.raises(CosoriKettleUnconfirmedError) as raised:
+            await device.start_heating()
+
+    assert "unconfirmed" in str(raised.value)
+    assert kettle_client.heating is True
+
+
+async def test_uncommandable_reported_target_cannot_start_heating(
+    device, kettle_client
+):
+    """A corrupt setpoint must raise a clean error, never a raw ValueError."""
+    kettle_client.target = 80
+    with pytest.raises(CosoriKettleError, match="target temperature"):
+        await device.start_heating()
+    assert device.current_temp_f == 92
+    assert device.on_base is True
+    assert kettle_client.writes[-1].hex() == "a522010400b300404000"
+
+
+async def test_cancelled_poll_write_drops_the_wedged_client(ble_device, kettle_client):
+    """A cancelled transaction must not leave a client marked connected."""
+    started = asyncio.Event()
+    original = kettle_client.write_gatt_char
+
+    async def hanging_poll_write(characteristic, packet, response):
+        if packet[6:10] == bytes.fromhex("00404000"):
+            started.set()
+            await asyncio.Future()
+        await original(characteristic, packet, response)
+
+    kettle_client.write_gatt_char = hanging_poll_write
+    device = CosoriKettleDevice(ble_device)
+    with patch(
+        "cosori_kettle_ble.device.establish_connection",
+        AsyncMock(return_value=kettle_client),
+    ):
+        task = asyncio.create_task(device.update())
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert kettle_client.disconnect.await_count == 1
+    assert device.is_connected is False
+
+    recovered = KettleClient()
+    with patch(
+        "cosori_kettle_ble.device.establish_connection",
+        AsyncMock(return_value=recovered),
+    ) as connect:
+        await device.update()
+    assert connect.await_count == 1
+    assert device.current_temp_f == 92
+    await device.disconnect()
+
+
+async def test_hung_disconnect_cannot_hold_the_connection_lock(
+    ble_device, kettle_client
+):
+    """A deadline must not hand control to an unresponsive disconnect."""
+    started = asyncio.Event()
+
+    async def pending_subscription(*args, **kwargs):
+        started.set()
+        await asyncio.Future()
+
+    async def hanging_disconnect():
+        await asyncio.Future()
+
+    kettle_client.start_notify.side_effect = pending_subscription
+    kettle_client.disconnect = AsyncMock(side_effect=hanging_disconnect)
+    device = CosoriKettleDevice(ble_device)
+    with (
+        patch(
+            "cosori_kettle_ble.device.establish_connection",
+            AsyncMock(return_value=kettle_client),
+        ),
+        patch("cosori_kettle_ble.device.DISCONNECT_TIMEOUT", 0.05),
+    ):
+        task = asyncio.create_task(device.connect())
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 2.0)
+    assert device._connection_lock.locked() is False
     assert device.is_connected is False

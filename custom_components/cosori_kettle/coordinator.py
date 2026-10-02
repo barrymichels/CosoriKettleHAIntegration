@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import timedelta
-from typing import NoReturn
+from typing import NoReturn, TypeVar
 
 from bleak.backends.device import BLEDevice
 from homeassistant.components import bluetooth
@@ -13,15 +15,25 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .const import CONF_HANDSHAKE, DOMAIN, UPDATE_INTERVAL
+from .const import (
+    COMMAND_TIMEOUT,
+    CONF_HANDSHAKE,
+    DOMAIN,
+    POLL_CONNECT_TIMEOUT,
+    POLL_TIMEOUT,
+    UPDATE_INTERVAL,
+)
 from .cosori_kettle_ble import CosoriKettleDevice
 from .cosori_kettle_ble.exceptions import (
     CosoriKettleConnectionError,
     CosoriKettleError,
     CosoriKettleTimeoutError,
+    CosoriKettleUnconfirmedError,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+_CommandT = TypeVar("_CommandT")
 
 
 class CosoriKettleDataUpdateCoordinator(DataUpdateCoordinator[None]):
@@ -65,7 +77,12 @@ class CosoriKettleDataUpdateCoordinator(DataUpdateCoordinator[None]):
 
     async def _async_update_data(self) -> None:
         try:
-            await self.device.update()
+            async with asyncio.timeout(POLL_TIMEOUT):
+                await self.device.update(POLL_CONNECT_TIMEOUT)
+        except TimeoutError as err:
+            raise UpdateFailed(
+                f"Status transaction did not finish within {POLL_TIMEOUT}s"
+            ) from err
         except CosoriKettleError as err:
             raise UpdateFailed(str(err)) from err
 
@@ -90,36 +107,50 @@ class CosoriKettleDataUpdateCoordinator(DataUpdateCoordinator[None]):
     def heating(self) -> bool:
         return self.device.heating
 
-    async def async_set_temperature(
-        self, temperature: float, *, start: bool | None = None
-    ) -> None:
+    async def _async_command(
+        self, name: str, run: Callable[[], Awaitable[_CommandT]]
+    ) -> _CommandT:
+        """Run one control transaction under a strict deadline."""
         try:
-            refreshed = await self.device.set_target_temperature(
-                temperature, start=start
+            async with asyncio.timeout(COMMAND_TIMEOUT):
+                return await run()
+        except TimeoutError:
+            self._raise_command_error(
+                CosoriKettleUnconfirmedError(
+                    f"{name} did not finish within {COMMAND_TIMEOUT}s, so its "
+                    "outcome is unconfirmed"
+                )
             )
         except CosoriKettleError as err:
             self._raise_command_error(err)
+
+    async def async_set_temperature(
+        self, temperature: float, *, start: bool | None = None
+    ) -> None:
+        refreshed = await self._async_command(
+            "Set target temperature",
+            lambda: self.device.set_target_temperature(temperature, start=start),
+        )
         if refreshed:
             self.async_set_updated_data(None)
         else:
             self.async_update_listeners()
 
     def _raise_command_error(self, err: CosoriKettleError) -> NoReturn:
-        if isinstance(err, (CosoriKettleConnectionError, CosoriKettleTimeoutError)):
+        if isinstance(
+            err,
+            CosoriKettleConnectionError
+            | CosoriKettleTimeoutError
+            | CosoriKettleUnconfirmedError,
+        ):
             self.async_set_update_error(UpdateFailed(str(err)))
             raise HomeAssistantError(str(err)) from err
         raise ServiceValidationError(str(err)) from err
 
     async def async_start_heating(self) -> None:
-        try:
-            await self.device.start_heating()
-        except CosoriKettleError as err:
-            self._raise_command_error(err)
+        await self._async_command("Start heating", self.device.start_heating)
         self.async_set_updated_data(None)
 
     async def async_stop_heating(self) -> None:
-        try:
-            await self.device.stop_heating()
-        except CosoriKettleError as err:
-            self._raise_command_error(err)
+        await self._async_command("Stop heating", self.device.stop_heating)
         self.async_set_updated_data(None)

@@ -20,6 +20,7 @@ class KettleClient:
         self.stopping = False
         self.target = 212
         self.respond = True
+        self.respond_poll = True
         self.disconnect = AsyncMock(side_effect=self._disconnect)
         self.start_notify = AsyncMock(side_effect=self._subscribe)
 
@@ -54,10 +55,9 @@ class KettleClient:
             self.heating = False
         elif packet[1] == 0x12 and payload == bytes.fromhex("00414000"):
             self.heating = not self.stopping
-        if self.respond and (
-            payload == bytes.fromhex("00404000")
-            or payload[:4] == bytes.fromhex("00f0a300")
-        ):
+        if payload == bytes.fromhex("00404000") and self.respond_poll:
+            self.status()
+        elif self.respond and payload[:4] == bytes.fromhex("00f0a300"):
             self.status()
 
 

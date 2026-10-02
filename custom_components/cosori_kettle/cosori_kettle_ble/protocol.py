@@ -7,7 +7,9 @@ from typing import NamedTuple
 from .const import (
     FRAME_TYPE_COMPACT,
     FRAME_TYPE_EXTENDED,
+    MAX_SETPOINT_F,
     MAX_VALID_READING_F,
+    MIN_SETPOINT_F,
     MIN_VALID_READING_F,
     MODE_BOIL,
     MODE_CUSTOM,
@@ -19,7 +21,7 @@ class KettleStatus(NamedTuple):
     """Status received from the kettle (temperatures are Fahrenheit)."""
 
     current_temp_f: float
-    target_temp_f: float
+    target_temp_f: float | None
     on_base: bool | None
     heating: bool
 
@@ -76,10 +78,12 @@ class CosoriProtocol:
 
     def build_setpoint(self, temp_f: int, mode: int | None = None) -> bytes:
         """Set the heating setpoint."""
-        if not 104 <= temp_f <= 212:
-            raise ValueError("Setpoint must be between 104 and 212°F")
+        if not MIN_SETPOINT_F <= temp_f <= MAX_SETPOINT_F:
+            raise ValueError(
+                f"Setpoint must be between {MIN_SETPOINT_F} and {MAX_SETPOINT_F}°F"
+            )
         if mode is None:
-            mode = MODE_BOIL if temp_f == 212 else MODE_CUSTOM
+            mode = MODE_BOIL if temp_f == MAX_SETPOINT_F else MODE_CUSTOM
         payload = bytes([0x00, 0xF0, 0xA3, 0x00, mode, temp_f, 0x01, 0x10, 0x0E])
         return self._build_packet(FRAME_TYPE_COMPACT, payload)
 
@@ -143,12 +147,17 @@ class CosoriProtocol:
             return None
         if not MIN_VALID_READING_F <= payload[7] <= MAX_VALID_READING_F:
             return None
+        # A setpoint outside the range the kettle accepts cannot be commanded,
+        # so treat it as corrupt while keeping the reading and base state.
+        target_temp_f = (
+            float(payload[6])
+            if MIN_SETPOINT_F <= payload[6] <= MAX_SETPOINT_F
+            else None
+        )
         if data[1] == FRAME_TYPE_EXTENDED and len(payload) >= 15:
             self._on_base = payload[14] == 0
         self._last_status_seq = data[2]
-        return KettleStatus(
-            float(payload[7]), float(payload[6]), self._on_base, heating
-        )
+        return KettleStatus(float(payload[7]), target_temp_f, self._on_base, heating)
 
 
 def fahrenheit_to_celsius(temp_f: float) -> float:

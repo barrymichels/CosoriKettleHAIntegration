@@ -21,7 +21,6 @@
     },
     "abort": {
       "already_configured": "Device is already configured",
-      "no_devices_found": "No Cosori Kettles found. Make sure your kettle is powered on and within Bluetooth range.",
       "not_supported": "This device is not a supported Cosori Kettle"
     },
     "flow_title": "{name}",

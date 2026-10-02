@@ -17,3 +17,4 @@ jobs:
       - run: black --check custom_components tests
       - run: ruff check custom_components tests
       - run: MYPYPATH=custom_components/cosori_kettle mypy -p cosori_kettle_ble
+      - run: mypy --python-version 3.14 custom_components/cosori_kettle

@@ -1,6 +1,8 @@
 """Use real HA setup, platforms, config flows, and service validation."""
 
+import asyncio
 import json
+import re
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -20,7 +22,7 @@ from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.cosori_kettle.const import DOMAIN
+from custom_components.cosori_kettle.const import DOMAIN, SERVICE_UUID
 from custom_components.cosori_kettle.cosori_kettle_ble.exceptions import (
     CosoriKettleTimeoutError,
 )
@@ -267,8 +269,34 @@ def test_manifest_matches_core_bluetooth_dependency():
     core_manifest = json.loads(
         Path(bluetooth.__file__).with_name("manifest.json").read_text()
     )
+
+    def names(requirements: list[str]) -> set[str]:
+        return {re.split(r"[=<>!~]", item)[0] for item in requirements}
+
     assert manifest["iot_class"] == "local_polling"
-    assert set(manifest["requirements"]) <= set(core_manifest["requirements"])
+    assert manifest["dependencies"] == ["bluetooth_adapters"]
+    assert manifest["bluetooth"] == [
+        {"connectable": True, "service_uuid": SERVICE_UUID}
+    ]
+    # A pinned requirement can conflict with the version Home Assistant core
+    # already ships, so this integration must let core supply the package.
+    assert manifest["requirements"] == ["bleak-retry-connector"]
+    assert names(manifest["requirements"]) <= names(core_manifest["requirements"])
+
+
+def test_release_version_is_consistent_across_manifests():
+    import tomllib
+
+    import cosori_kettle_ble
+
+    pyproject = tomllib.loads(Path("pyproject.toml").read_text())
+    integration_manifest = json.loads(
+        Path("custom_components/cosori_kettle/manifest.json").read_text()
+    )
+    # One release number for the integration HACS installs, the library it
+    # bundles, and the distribution metadata pip reports.
+    assert cosori_kettle_ble.__version__ == pyproject["project"]["version"]
+    assert integration_manifest["version"] == pyproject["project"]["version"]
 
 
 async def test_ha_shutdown_releases_connection(hass, entry, kettle_client):
@@ -319,6 +347,7 @@ async def test_invalid_device_status_cannot_create_entry(
         await original_wait(self, 0.01)
 
     kettle_client.respond = False
+    kettle_client.respond_poll = False
     with (
         patch(
             "homeassistant.components.bluetooth.async_discovered_service_info",
@@ -397,3 +426,128 @@ async def test_setup_logs_connection_failure_reason(hass, ble_device, caplog):
         )
     assert result["errors"] == {"base": "cannot_connect"}
     assert "proxy connection slot unavailable" in caplog.text
+
+
+async def test_water_heater_target_follows_kettle_setpoint(hass, entry, kettle_client):
+    """The reported setpoint must track the kettle, not the first frame read."""
+    kettle_client.target = 185
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+    assert hass.states.get("water_heater.cosori_kettle").attributes[
+        "temperature"
+    ] == pytest.approx(85, abs=0.5)
+
+
+async def test_poll_deadline_fails_and_recovers(hass, entry):
+    """A stuck reconnection must fail within the deadline and not strand locks."""
+    from conftest import KettleClient
+
+    coordinator = entry.runtime_data
+    coordinator.device._handle_disconnect(coordinator.device._client)
+
+    async def hanging_connection(*args, **kwargs):
+        await asyncio.Future()
+
+    with (
+        patch("custom_components.cosori_kettle.coordinator.POLL_TIMEOUT", 0.05),
+        patch(f"{BLE_MODULE}.establish_connection", hanging_connection),
+    ):
+        await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert coordinator.last_update_success is False
+    assert (
+        hass.states.get("sensor.cosori_kettle_current_temperature").state
+        == STATE_UNAVAILABLE
+    )
+
+    recovered = KettleClient()
+    with patch(f"{BLE_MODULE}.establish_connection", AsyncMock(return_value=recovered)):
+        await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert coordinator.last_update_success is True
+    assert (
+        hass.states.get("sensor.cosori_kettle_current_temperature").state
+        != STATE_UNAVAILABLE
+    )
+
+
+async def test_command_deadline_reports_unconfirmed(hass, entry):
+    """A control transaction that never finishes must surface as unconfirmed."""
+    coordinator = entry.runtime_data
+
+    async def hanging_start():
+        await asyncio.Future()
+
+    with (
+        patch("custom_components.cosori_kettle.coordinator.COMMAND_TIMEOUT", 0.05),
+        patch.object(coordinator.device, "start_heating", hanging_start),
+    ):
+        with pytest.raises(HomeAssistantError, match="unconfirmed"):
+            await coordinator.async_start_heating()
+    assert coordinator.last_update_success is False
+
+
+async def test_unconfirmed_command_surfaces_as_home_assistant_error(hass, entry):
+    from custom_components.cosori_kettle.cosori_kettle_ble.exceptions import (
+        CosoriKettleUnconfirmedError,
+    )
+
+    coordinator = entry.runtime_data
+    with patch.object(
+        coordinator.device,
+        "start_heating",
+        side_effect=CosoriKettleUnconfirmedError("start written but unconfirmed"),
+    ):
+        with pytest.raises(HomeAssistantError, match="unconfirmed"):
+            await coordinator.async_start_heating()
+    assert coordinator.last_update_success is False
+
+
+async def test_poll_deadline_releases_the_wedged_connection(hass, entry, kettle_client):
+    """A timed-out write must force the next poll onto a fresh proxy route."""
+    from conftest import KettleClient
+
+    coordinator = entry.runtime_data
+    original = kettle_client.write_gatt_char
+
+    async def hanging_poll_write(characteristic, packet, response):
+        if packet[6:10] == bytes.fromhex("00404000"):
+            await asyncio.Future()
+        await original(characteristic, packet, response)
+
+    kettle_client.write_gatt_char = hanging_poll_write
+    with patch("custom_components.cosori_kettle.coordinator.POLL_TIMEOUT", 0.05):
+        await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert coordinator.last_update_success is False
+    assert kettle_client.disconnect.await_count == 1
+    assert coordinator.device.is_connected is False
+
+    recovered = KettleClient()
+    with patch(
+        f"{BLE_MODULE}.establish_connection", AsyncMock(return_value=recovered)
+    ) as connect:
+        await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert connect.await_count == 1
+    assert coordinator.last_update_success is True
+
+
+async def test_command_deadline_releases_the_wedged_connection(
+    hass, entry, kettle_client
+):
+    """A timed-out control write must not leave the client marked usable."""
+    coordinator = entry.runtime_data
+    original = kettle_client.write_gatt_char
+
+    async def hanging_control_write(characteristic, packet, response):
+        if packet[6:10] == bytes.fromhex("00f0a300"):
+            await asyncio.Future()
+        await original(characteristic, packet, response)
+
+    kettle_client.write_gatt_char = hanging_control_write
+    with patch("custom_components.cosori_kettle.coordinator.COMMAND_TIMEOUT", 0.5):
+        with pytest.raises(HomeAssistantError, match="unconfirmed"):
+            await coordinator.async_start_heating()
+    assert kettle_client.disconnect.await_count == 1
+    assert coordinator.device.is_connected is False
