@@ -76,12 +76,8 @@ class CosoriKettleWaterHeater(
 
     @property
     def current_operation(self) -> str:
-        """Return current operation (off/on)."""
-        if not self.coordinator.on_base:
-            return STATE_OFF
-        if self.coordinator.heating:
-            return STATE_ON
-        return STATE_OFF
+        """Return the heating state; the base interlock guards starting heat."""
+        return STATE_ON if self.coordinator.heating else STATE_OFF
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
         """Set target temperature."""
@@ -117,9 +113,3 @@ class CosoriKettleWaterHeater(
         """Turn off heating."""
         _LOGGER.debug("Turning off heating")
         await self.coordinator.async_stop_heating()
-
-    @property
-    def available(self) -> bool:
-        """Return if entity is available."""
-        # Entity is available if coordinator has data and device is on base
-        return super().available and self.coordinator.on_base is True

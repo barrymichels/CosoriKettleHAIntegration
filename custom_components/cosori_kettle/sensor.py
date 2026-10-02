@@ -30,7 +30,6 @@ class CosoriKettleSensorEntityDescription(SensorEntityDescription):
 SENSORS: tuple[CosoriKettleSensorEntityDescription, ...] = (
     CosoriKettleSensorEntityDescription(
         key="current_temperature",
-        name="Current Temperature",
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
@@ -40,9 +39,7 @@ SENSORS: tuple[CosoriKettleSensorEntityDescription, ...] = (
     CosoriKettleSensorEntityDescription(
         key="target_temperature",
         entity_category=EntityCategory.DIAGNOSTIC,
-        name="Target Temperature",
         device_class=SensorDeviceClass.TEMPERATURE,
-        state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         value_fn=lambda coordinator: coordinator.target_temp_c,
         entity_registry_enabled_default=False,
@@ -79,6 +76,7 @@ class CosoriKettleSensor(
         """Initialize the sensor."""
         super().__init__(coordinator)
         self.entity_description = description
+        self._attr_translation_key = description.key
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
         self._attr_device_info = kettle_device_info(entry, coordinator.device.address)
 

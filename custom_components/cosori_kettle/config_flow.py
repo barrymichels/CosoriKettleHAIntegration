@@ -14,12 +14,13 @@ from homeassistant.const import CONF_ADDRESS
 from homeassistant.helpers import selector
 
 from .const import CONF_HANDSHAKE, DOMAIN, SERVICE_UUID
-from .cosori_kettle_ble import CosoriKettleDevice
+from .cosori_kettle_ble import CosoriKettleDevice, parse_registration_handshake
 from .cosori_kettle_ble.exceptions import CosoriKettleError
 
 _LOGGER = logging.getLogger(__name__)
 
 HANDSHAKE_FIELDS = ("handshake_1", "handshake_2", "handshake_3")
+MAX_HANDSHAKE_FIELD_CHARS = 256
 MAC_PATTERN = re.compile(r"(?:[0-9A-F]{2}:){5}[0-9A-F]{2}")
 
 
@@ -44,25 +45,26 @@ class CosoriKettleConfigFlow(ConfigFlow, domain=DOMAIN):
         return await self.async_step_bluetooth_confirm()
 
     def _handshake_schema(self) -> dict[Any, Any]:
-        if not self.show_advanced_options:
-            return {}
+        # show_advanced_options is deprecated and now always returns True, so the
+        # optional fields are offered unconditionally instead of gating on it.
         return {vol.Optional(field): str for field in HANDSHAKE_FIELDS}
 
     async def _validate_device(
         self, address: str, user_input: dict[str, Any]
     ) -> tuple[str | None, dict[str, Any]]:
         """Probe without heating; return (error key, entry data)."""
-        try:
-            values = [user_input.get(field, "").strip() for field in HANDSHAKE_FIELDS]
-            handshake = (
-                [bytes.fromhex(value.replace(":", "")) for value in values]
-                if any(values)
-                else None
-            )
-            if handshake is not None and any(not packet for packet in handshake):
+        values = [user_input.get(field, "").strip() for field in HANDSHAKE_FIELDS]
+        handshake: list[bytes] | None = None
+        if any(values):
+            if sum(1 for value in values if value) != len(HANDSHAKE_FIELDS) or any(
+                len(value) > MAX_HANDSHAKE_FIELD_CHARS for value in values
+            ):
                 return "invalid_handshake", {}
-        except ValueError:
-            return "invalid_handshake", {}
+            try:
+                handshake = parse_registration_handshake(values)
+            except ValueError as err:
+                _LOGGER.warning("Rejected custom handshake for %s: %s", address, err)
+                return "invalid_handshake", {}
         ble_device = bluetooth.async_ble_device_from_address(
             self.hass, address, connectable=True
         )

@@ -296,3 +296,65 @@ async def test_hung_disconnect_cannot_hold_the_connection_lock(
             await asyncio.wait_for(task, 2.0)
     assert device._connection_lock.locked() is False
     assert device.is_connected is False
+
+
+async def test_written_but_unconfirmed_target_is_superseded_by_the_kettle(
+    device, kettle_client
+):
+    """A setpoint the kettle never accepted must stop shadowing its reading."""
+    await device.update()
+    assert device.target_temp_f == 212
+
+    kettle_client.respond = False
+    kettle_client.respond_poll = False
+    original = device._wait_status
+
+    async def short_wait():
+        await original(0.01)
+
+    with patch.object(device, "_wait_status", side_effect=short_wait):
+        with pytest.raises(CosoriKettleUnconfirmedError):
+            await device.set_target_temperature(80, start=True)
+
+    recovered = KettleClient()
+    with patch(
+        "cosori_kettle_ble.device.establish_connection",
+        AsyncMock(return_value=recovered),
+    ):
+        await device.update()
+
+    assert recovered.target == 212
+    assert device.target_temp_f == 212
+
+
+async def test_unwritten_staged_target_survives_a_refused_start(device, kettle_client):
+    """A start refused before any write keeps the staged target for later."""
+    await device.update()
+    assert await device.set_target_temperature(80) is False
+    assert device.target_temp_f == 176
+
+    kettle_client.on_base = False
+    await device.update()
+    assert device.target_temp_f == 176
+    with pytest.raises(CosoriKettleError, match="on its base"):
+        await device.start_heating()
+    assert kettle_client.target == 212
+
+    kettle_client.on_base = True
+    await device.update()
+    await device.start_heating()
+    assert kettle_client.target == 176
+    assert device.target_temp_f == 176
+
+
+async def test_connect_deadline_binds_regardless_of_the_connector(ble_device):
+    """establish_connection ignores a caller timeout, so the device bounds it."""
+
+    async def slow_connection(*args, **kwargs):
+        await asyncio.sleep(5)
+
+    device = CosoriKettleDevice(ble_device)
+    with patch("cosori_kettle_ble.device.establish_connection", slow_connection):
+        with pytest.raises(CosoriKettleTimeoutError):
+            await device.connect(timeout=0.05)
+    assert device.is_connected is False

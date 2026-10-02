@@ -22,7 +22,7 @@ from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.cosori_kettle.const import DOMAIN, SERVICE_UUID
+from custom_components.cosori_kettle.const import CONF_HANDSHAKE, DOMAIN, SERVICE_UUID
 from custom_components.cosori_kettle.cosori_kettle_ble.exceptions import (
     CosoriKettleTimeoutError,
 )
@@ -551,3 +551,140 @@ async def test_command_deadline_releases_the_wedged_connection(
             await coordinator.async_start_heating()
     assert kettle_client.disconnect.await_count == 1
     assert coordinator.device.is_connected is False
+
+
+async def test_water_heater_stays_available_off_base_and_stops(
+    hass, entry, kettle_client
+):
+    """Availability follows the link, so turn_off is never silently dropped."""
+    coordinator = entry.runtime_data
+    kettle_client.heating = True
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert hass.states.get("water_heater.cosori_kettle").state == "on"
+
+    kettle_client.on_base = False
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    heater = hass.states.get("water_heater.cosori_kettle")
+    assert heater.state == "on"
+    assert hass.states.get("binary_sensor.cosori_kettle_on_base").state == "off"
+
+    await hass.services.async_call(
+        "water_heater",
+        "turn_off",
+        {"entity_id": heater.entity_id},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+    assert kettle_client.heating is False
+    assert hass.states.get("water_heater.cosori_kettle").state == "off"
+
+
+async def test_starting_heat_off_base_is_refused(hass, entry, kettle_client):
+    """The base interlock guards starting heat, not the ability to stop it."""
+    coordinator = entry.runtime_data
+    kettle_client.on_base = False
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert hass.states.get("water_heater.cosori_kettle").state == "off"
+    with pytest.raises(ServiceValidationError, match="on its base"):
+        await coordinator.async_start_heating()
+    assert kettle_client.heating is False
+
+
+async def test_flow_rejects_handshake_that_could_start_heating(
+    hass, ble_device, kettle_client
+):
+    """A captured control frame must never become a replayed registration."""
+    from custom_components.cosori_kettle.cosori_kettle_ble.protocol import (
+        CosoriProtocol,
+    )
+
+    stream = b"".join(CosoriProtocol.build_hello_min()) + CosoriProtocol().build_ctrl()
+    result = await _configure_manual_flow(
+        hass,
+        ble_device,
+        {
+            "handshake_1": stream[:14].hex(),
+            "handshake_2": stream[14:28].hex(),
+            "handshake_3": stream[28:].hex(),
+        },
+        connect=AsyncMock(),
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "invalid_handshake"}
+    assert hass.config_entries.async_entries(DOMAIN) == []
+
+
+async def test_flow_accepts_and_stores_a_valid_custom_handshake(
+    hass, ble_device, kettle_client
+):
+    """The default registration is fragmented, so it must stay acceptable."""
+    from custom_components.cosori_kettle.cosori_kettle_ble.protocol import (
+        CosoriProtocol,
+    )
+
+    packets = CosoriProtocol.build_hello_min()
+    result = await _configure_manual_flow(
+        hass,
+        ble_device,
+        {f"handshake_{i + 1}": packet.hex() for i, packet in enumerate(packets)},
+        connect=AsyncMock(return_value=kettle_client),
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_HANDSHAKE] == [packet.hex() for packet in packets]
+
+
+@pytest.mark.parametrize(
+    "stored_handshake", [["zz", "zz", "zz"], 42, [None], [42], "a522"]
+)
+async def test_invalid_stored_handshake_fails_setup_cleanly(
+    hass, ble_device, caplog, stored_handshake
+):
+    """A corrupted or hand-edited entry must fail with a reason, not a crash."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Cosori Kettle",
+        unique_id=ble_device.address,
+        data={CONF_ADDRESS: ble_device.address, CONF_HANDSHAKE: stored_handshake},
+    )
+    entry.add_to_hass(hass)
+    with (
+        patch("homeassistant.setup.async_process_deps_reqs", AsyncMock()),
+        patch("homeassistant.config_entries.async_process_deps_reqs", AsyncMock()),
+        patch(
+            "homeassistant.components.bluetooth.async_ble_device_from_address",
+            return_value=ble_device,
+        ),
+        patch(f"{BLE_MODULE}.establish_connection", AsyncMock()) as connect,
+    ):
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.SETUP_ERROR
+    assert connect.await_count == 0
+    assert "handshake" in caplog.text
+
+
+async def _configure_manual_flow(hass, ble_device, user_input, connect):
+    with (
+        patch(
+            "homeassistant.components.bluetooth.async_discovered_service_info",
+            return_value=[],
+        ),
+        patch(
+            "homeassistant.components.bluetooth.async_ble_device_from_address",
+            return_value=ble_device,
+        ),
+        patch(f"{BLE_MODULE}.establish_connection", connect),
+        patch(
+            "custom_components.cosori_kettle.async_setup_entry",
+            AsyncMock(return_value=True),
+        ),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": "user"}
+        )
+        return await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_ADDRESS: ble_device.address, **user_input}
+        )

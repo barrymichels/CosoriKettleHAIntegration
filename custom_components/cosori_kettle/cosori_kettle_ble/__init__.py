@@ -7,6 +7,7 @@ from .exceptions import (
     CosoriKettleTimeoutError,
     CosoriKettleUnconfirmedError,
 )
+from .protocol import parse_registration_handshake, validate_registration_packets
 
 __version__ = "0.3.0"
 __all__ = [
@@ -15,4 +16,6 @@ __all__ = [
     "CosoriKettleConnectionError",
     "CosoriKettleTimeoutError",
     "CosoriKettleUnconfirmedError",
+    "parse_registration_handshake",
+    "validate_registration_packets",
 ]

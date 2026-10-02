@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 from bleak.backends.device import BLEDevice
 from cosori_kettle_ble.protocol import CosoriProtocol
-from test_protocol import ON_BASE
+from test_protocol import OFF_BASE, ON_BASE
 
 
 class KettleClient:
@@ -21,6 +21,7 @@ class KettleClient:
         self.target = 212
         self.respond = True
         self.respond_poll = True
+        self.on_base = True
         self.disconnect = AsyncMock(side_effect=self._disconnect)
         self.start_notify = AsyncMock(side_effect=self._subscribe)
 
@@ -32,7 +33,7 @@ class KettleClient:
         self.notify = notify
 
     def status(self):
-        packet = bytearray(ON_BASE)
+        packet = bytearray(ON_BASE if self.on_base else OFF_BASE)
         packet[10] = int(self.heating)
         packet[12] = self.target
         packet[5] = CosoriProtocol._calculate_checksum(bytes(packet[:5] + packet[6:]))

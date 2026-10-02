@@ -28,14 +28,12 @@ class CosoriKettleBinarySensorEntityDescription(BinarySensorEntityDescription):
 BINARY_SENSORS: tuple[CosoriKettleBinarySensorEntityDescription, ...] = (
     CosoriKettleBinarySensorEntityDescription(
         key="on_base",
-        name="On Base",
         device_class=BinarySensorDeviceClass.CONNECTIVITY,
         value_fn=lambda coordinator: coordinator.on_base,
         entity_registry_enabled_default=True,
     ),
     CosoriKettleBinarySensorEntityDescription(
         key="heating",
-        name="Heating",
         device_class=BinarySensorDeviceClass.HEAT,
         value_fn=lambda coordinator: coordinator.heating,
         entity_registry_enabled_default=True,
@@ -73,6 +71,7 @@ class CosoriKettleBinarySensor(
         """Initialize the binary sensor."""
         super().__init__(coordinator)
         self.entity_description = description
+        self._attr_translation_key = description.key
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
         self._attr_device_info = kettle_device_info(entry, coordinator.device.address)
 

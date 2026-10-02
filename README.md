@@ -27,9 +27,9 @@ This remains a custom integration. Successful setup with a physical kettle throu
    Keep the rest of your board, network, API, and OTA configuration. Flash the updated ESPHome configuration, then ensure the device is connected under **Settings → Devices & services → ESPHome** and appears as a remote adapter in Bluetooth. Device Builder showing it online or its web page responding does not establish this API connection. If necessary, add the ESPHome integration using the device IP and native API port 6053. Match the API encryption setting to the new firmware; leave the encryption key blank for an empty `api:` block. Merely disabling the old client does not turn the ESP32 into a proxy.
 4. Install this integration and restart Home Assistant.
 5. Add **Cosori Kettle** under **Settings → Devices & services → Add integration**. Select a discovered device or enter the saved MAC address.
-6. If needed, enable advanced options in the setup dialog and enter the three custom handshake packets. Default registration matches the working ESPHome project.
+6. If your ESPHome configuration used a custom `handshake:` block, enter its three packet values in the setup dialog. Default registration matches the working ESPHome project.
 
-Setup connects, registers, and reads valid kettle status before creating the entry. It does not start heating. The service UUID `FFF0` is shared by other BLE products, so an advertisement alone is insufficient to identify a kettle. Manual MAC entry also supports kettles that omit that UUID from their advertisements.
+Setup connects, registers, and reads valid kettle status before creating the entry. It never sends a heating command: the three handshake packets are validated as one registration message, and frames that would set a setpoint, prepare one, or press control are rejected with **Invalid handshake** before any BLE traffic starts. The service UUID `FFF0` is shared by other BLE products, so an advertisement alone is insufficient to identify a kettle. Manual MAC entry also supports kettles that omit that UUID from their advertisements.
 
 ## Installation
 
@@ -57,7 +57,7 @@ For HACS installation, the updated code must first be pushed to a **public** Git
 
 Actual entity IDs depend on the device name and existing registry entries. Targets range from 40–100°C / 104–212°F, with integer Fahrenheit steps on the wire. Home Assistant displays and accepts water heater temperatures in its configured unit system. Check the entity ID and the water heater's `temperature_unit`, `temperature`, and `current_temperature` attributes under **Settings → Tools → States** before adapting examples. Temperature sensors can have separate display-unit overrides.
 
-Setting a temperature while off stages the target without starting heating, as in the ESPHome version. Turning on applies that target. Changing the target while heating applies it immediately. A staged target is what the entities show until the kettle echoes that setpoint back; after that, the reported target follows the kettle, so a setpoint changed on the kettle itself is reflected. Include `operation_mode: "on"` to set a target and start in one action:
+Setting a temperature while off stages the target without starting heating, as in the ESPHome version. Turning on applies that target. Changing the target while heating applies it immediately. A staged target is what the entities show until the kettle answers: it confirms the setpoint, or — if the setpoint frame was written and the kettle settled on a different value — the request failed and the reported target follows the kettle again. A staged target that was never written stays pending, including across reconnects, so a refused start does not discard it. Include `operation_mode: "on"` to set a target and start in one action:
 
 ```yaml
 action: water_heater.set_temperature
@@ -78,7 +78,7 @@ target:
 
 Keep-warm behavior is controlled by the kettle firmware. This integration sends the same boil/custom mode and start/stop transactions as the working ESPHome component; it does not implement a separate keep-warm timer.
 
-The water heater becomes unavailable off-base. Its sensors continue reporting off-base status while the BLE connection is alive. Communication failures mark all entities unavailable, and the next poll retries the connection through Home Assistant's current adapter/proxy route. Each poll and control transaction has a fixed deadline, and the connection cleanup that follows a deadline is itself bounded to 5 seconds, so a stuck transport cannot stall the refresh loop indefinitely. If a start or stop command was written but the kettle then reported no status, the action raises an error saying the outcome is unconfirmed rather than claiming success.
+Availability follows the Bluetooth link, not the base sensor: while the connection is healthy the water heater stays available and `water_heater.turn_off` always reaches the kettle, even off-base. Being off-base blocks **starting** heat — `turn_on` and `set_temperature` with `operation_mode: "on"` raise an error asking you to place the kettle on its base — and the `On Base` binary sensor keeps reporting the base state. Communication failures mark all entities unavailable, and the next poll retries the connection through Home Assistant's current adapter/proxy route. Each poll, control transaction, and connection attempt has a fixed deadline, and the connection cleanup that follows a deadline is itself bounded to 5 seconds, so a stuck transport cannot stall the refresh loop indefinitely. If a start or stop command was written but the kettle then reported no status, the action raises an error saying the outcome is unconfirmed rather than claiming success.
 
 ## Dashboard
 
@@ -106,7 +106,7 @@ After installation, check these with your kettle:
 
 1. Setup succeeds and temperatures agree with the working ESPHome readings.
 2. Changing the target while off does not heat; turning on applies the selected target.
-3. Both boil and a lower custom temperature start correctly; turn-off stops heating.
+3. Both boil and a lower custom temperature start correctly; turn-off stops heating, including while the kettle reads as off-base.
 4. Removing an idle kettle from its base changes the base sensor to off; compact updates do not reset it to on.
 5. Power cycling the kettle or proxy results in unavailable entities, followed by recovery.
 6. Disabling/unloading the integration releases its BLE connection so another client can connect.

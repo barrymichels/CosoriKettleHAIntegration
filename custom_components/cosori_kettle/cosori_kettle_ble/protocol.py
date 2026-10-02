@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import NamedTuple
 
 from .const import (
     FRAME_TYPE_COMPACT,
     FRAME_TYPE_EXTENDED,
+    HANDSHAKE_OPS,
+    MAX_HANDSHAKE_BYTES,
     MAX_SETPOINT_F,
     MAX_VALID_READING_F,
     MIN_SETPOINT_F,
@@ -158,6 +161,56 @@ class CosoriProtocol:
             self._on_base = payload[14] == 0
         self._last_status_seq = data[2]
         return KettleStatus(float(payload[7]), target_temp_f, self._on_base, heating)
+
+
+def validate_registration_packets(packets: Sequence[bytes]) -> None:
+    """Validate a custom handshake as a registration message, not a script.
+
+    The default registration is split across three GATT writes, so the packets
+    are checked as the assembled stream: every frame must be complete, carry a
+    valid checksum, and use an opcode that cannot start heating. A handshake is
+    replayed on every reconnect for the life of the config entry, so an accepted
+    frame is a frame the kettle will be told to run again and again.
+    """
+    stream = b"".join(packets)
+    if not stream or len(stream) > MAX_HANDSHAKE_BYTES:
+        raise ValueError(
+            f"Handshake must be between 1 and {MAX_HANDSHAKE_BYTES} bytes in total"
+        )
+    offset = 0
+    while offset < len(stream):
+        if stream[offset] != PACKET_HEADER or len(stream) - offset < 6:
+            raise ValueError("Handshake must assemble complete A5-framed packets")
+        length = int.from_bytes(stream[offset + 3 : offset + 5], "little")
+        end = offset + 6 + length
+        if length < 2 or end > len(stream):
+            raise ValueError("Handshake frame length does not match its packets")
+        frame = stream[offset:end]
+        if sum(frame) & 0xFF != 0xFF:
+            raise ValueError("Handshake frame checksum is invalid")
+        if frame[7] not in HANDSHAKE_OPS:
+            raise ValueError(
+                "Handshake may only register or request status; it must not "
+                "command the heating element"
+            )
+        offset = end
+
+
+def parse_registration_handshake(values: Sequence[str]) -> list[bytes]:
+    """Decode hex packets and validate them as one registration message.
+
+    Raises ValueError for anything unusable: a non-sequence, a non-string
+    element, undecodable hex, or a stream that is not a complete registration.
+    """
+    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
+        raise ValueError("Handshake must be a sequence of hexadecimal strings")
+    if not all(isinstance(value, str) for value in values):
+        raise ValueError("Handshake must be a sequence of hexadecimal strings")
+    packets = [
+        bytes.fromhex("".join(value.replace(":", "").split())) for value in values
+    ]
+    validate_registration_packets(packets)
+    return packets
 
 
 def fahrenheit_to_celsius(temp_f: float) -> float:

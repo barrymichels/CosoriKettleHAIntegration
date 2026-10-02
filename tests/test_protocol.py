@@ -1,6 +1,11 @@
 """Golden packets taken from the working ESPHome implementation."""
 
-from cosori_kettle_ble.protocol import CosoriProtocol
+import pytest
+from cosori_kettle_ble.protocol import (
+    CosoriProtocol,
+    parse_registration_handshake,
+    validate_registration_packets,
+)
 
 ON_BASE = bytes.fromhex(
     "a512191d0010014040000000d45c8c00000000000000003c690000000001100e000001"
@@ -84,3 +89,65 @@ def test_setpoint_outside_the_command_range_is_not_a_target():
     assert status.target_temp_f is None
     assert status.current_temp_f == 92
     assert status.on_base is True
+
+
+def test_custom_mode_setpoint_matches_reference_bytes():
+    """Every non-boil setpoint uses MODE_CUSTOM, so pin its own golden packet."""
+    assert (
+        CosoriProtocol().build_setpoint(176).hex() == "a522010900c600f0a30006b001100e"
+    )
+
+
+@pytest.mark.parametrize("temp_f", [103, 213, 0, 1000])
+def test_setpoint_outside_the_wire_range_is_rejected(temp_f):
+    with pytest.raises(ValueError, match="Setpoint must be between"):
+        CosoriProtocol().build_setpoint(temp_f)
+
+
+def test_default_registration_is_a_valid_handshake():
+    """The default registration is fragmented, so it is validated assembled."""
+    validate_registration_packets(CosoriProtocol.build_hello_min())
+
+
+def test_handshake_may_not_command_the_heating_element():
+    """A captured control frame must never be accepted as a registration."""
+    registration = b"".join(CosoriProtocol.build_hello_min())
+    for frame in (
+        CosoriProtocol().build_setpoint(212),
+        CosoriProtocol().build_hello5(),
+        CosoriProtocol().build_ctrl(),
+        CosoriProtocol().build_f4(),
+    ):
+        with pytest.raises(ValueError, match="heating element"):
+            validate_registration_packets([registration, frame])
+
+
+@pytest.mark.parametrize(
+    "packets",
+    [
+        [b"first", b"second", b"third"],
+        [b""],
+        [b"".join(CosoriProtocol.build_hello_min()) * 7],
+        [CosoriProtocol.build_hello_min()[0]],
+        [CosoriProtocol().build_poll()[:5]],
+    ],
+)
+def test_malformed_handshake_is_rejected(packets):
+    with pytest.raises(ValueError):
+        validate_registration_packets(packets)
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        42,
+        [None],
+        [42],
+        [b"a522"],
+        "a5220024008a0081d10036343238376139313765",
+    ],
+)
+def test_handshake_of_the_wrong_kind_is_a_value_error(values):
+    """A corrupted entry must fail as a validation error, never a crash."""
+    with pytest.raises(ValueError, match="sequence of hexadecimal strings"):
+        parse_registration_handshake(values)

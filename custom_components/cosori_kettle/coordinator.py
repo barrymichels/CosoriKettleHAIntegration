@@ -12,7 +12,11 @@ from bleak.backends.device import BLEDevice
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.exceptions import (
+    ConfigEntryError,
+    HomeAssistantError,
+    ServiceValidationError,
+)
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
@@ -23,7 +27,7 @@ from .const import (
     POLL_TIMEOUT,
     UPDATE_INTERVAL,
 )
-from .cosori_kettle_ble import CosoriKettleDevice
+from .cosori_kettle_ble import CosoriKettleDevice, parse_registration_handshake
 from .cosori_kettle_ble.exceptions import (
     CosoriKettleConnectionError,
     CosoriKettleError,
@@ -36,12 +40,30 @@ _LOGGER = logging.getLogger(__name__)
 _CommandT = TypeVar("_CommandT")
 
 
+def _decode_handshake(entry: ConfigEntry) -> list[bytes] | None:
+    """Decode the stored handshake, refusing frames that could heat."""
+    stored = entry.data.get(CONF_HANDSHAKE)
+    if not stored:
+        return None
+    # The parser reports every unusable shape as ValueError, so a corrupted or
+    # hand-edited entry cannot escape as TypeError or AttributeError.
+    try:
+        return parse_registration_handshake(stored)
+    except ValueError as err:
+        raise ConfigEntryError(
+            f"Stored handshake for {DOMAIN} is invalid: {err}"
+        ) from err
+
+
 class CosoriKettleDataUpdateCoordinator(DataUpdateCoordinator[None]):
     """Own one persistent BLE connection and its polling lifecycle."""
 
     def __init__(
         self, hass: HomeAssistant, ble_device: BLEDevice, entry: ConfigEntry
     ) -> None:
+        # Decode before super().__init__() registers the shutdown callback: a bad
+        # stored handshake must fail before a half-built coordinator exists.
+        handshake = _decode_handshake(entry)
         super().__init__(
             hass,
             _LOGGER,
@@ -50,14 +72,11 @@ class CosoriKettleDataUpdateCoordinator(DataUpdateCoordinator[None]):
             update_interval=timedelta(seconds=UPDATE_INTERVAL),
         )
         self.address = ble_device.address
-        handshake = entry.data.get(CONF_HANDSHAKE)
         self.device = CosoriKettleDevice(
             device=ble_device,
             disconnect_callback=self._handle_disconnect,
             ble_device_callback=self._get_ble_device,
-            handshake=(
-                [bytes.fromhex(packet) for packet in handshake] if handshake else None
-            ),
+            handshake=handshake,
         )
 
     @callback

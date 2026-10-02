@@ -39,9 +39,12 @@ coverage.xml
 *.cover
 .hypothesis/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # Virtual environments
 venv/
+.venv/
 ENV/
 env/
 

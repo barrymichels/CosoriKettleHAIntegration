@@ -63,6 +63,7 @@ class CosoriKettleDevice:
         self._disconnect_callback = disconnect_callback
         self._status: KettleStatus | None = None
         self._staged_target_f: int | None = None
+        self._staged_target_written = False
         self._reported_target_f: float | None = None
         self._ready = False
         self._notifications_received = 0
@@ -96,7 +97,7 @@ class CosoriKettleDevice:
 
     @property
     def target_temp_f(self) -> float | None:
-        """Staged target until the kettle confirms it, else the reported setpoint."""
+        """Staged target until the kettle confirms or contradicts it."""
         if self._staged_target_f is not None:
             return float(self._staged_target_f)
         return self._reported_target_f
@@ -146,10 +147,29 @@ class CosoriKettleDevice:
             )
             if status.target_temp_f is not None:
                 self._reported_target_f = status.target_temp_f
-                # The kettle echoing our request back retires the staged target.
-                if self._staged_target_f == round(status.target_temp_f):
-                    self._staged_target_f = None
+                self._reconcile_staged_target(status.target_temp_f)
             self._notification_event.set()
+
+    def _reconcile_staged_target(self, reported_f: float) -> None:
+        """Stop shadowing the kettle once its answer is known."""
+        if self._staged_target_f is None:
+            return
+        if round(reported_f) == self._staged_target_f:
+            # The kettle echoed the request back, so it is confirmed.
+            self._retire_staged_target("confirmed")
+        elif self._staged_target_written:
+            # The setpoint frame was written and the kettle settled elsewhere,
+            # so the request failed: the kettle's reading is authoritative.
+            # An unwritten staged target stays pending for the next turn on.
+            self._retire_staged_target(
+                f"the kettle reports {reported_f}°F instead of "
+                f"{self._staged_target_f}°F"
+            )
+
+    def _retire_staged_target(self, reason: str) -> None:
+        _LOGGER.debug("Kettle %s: staged target retired (%s)", self.address, reason)
+        self._staged_target_f = None
+        self._staged_target_written = False
 
     @asynccontextmanager
     async def _transaction(self) -> AsyncIterator[None]:
@@ -175,14 +195,17 @@ class CosoriKettleDevice:
                 if self._ble_device_callback:
                     self._device = self._ble_device_callback()
                 _LOGGER.debug("Connecting to kettle %s", self.address)
-                self._client = await establish_connection(
-                    BleakClientWithServiceCache,
-                    self._device,
-                    self.name,
-                    disconnected_callback=self._handle_disconnect,
-                    ble_device_callback=self._ble_device_callback,
-                    timeout=timeout,
-                )
+                # establish_connection ignores a caller timeout: it applies its
+                # own per-attempt timeout (20s) and retries up to four times, so
+                # the caller's budget has to bound the whole retry loop here.
+                async with asyncio.timeout(timeout):
+                    self._client = await establish_connection(
+                        BleakClientWithServiceCache,
+                        self._device,
+                        self.name,
+                        disconnected_callback=self._handle_disconnect,
+                        ble_device_callback=self._ble_device_callback,
+                    )
                 _LOGGER.debug(
                     "Connected to kettle %s; subscribing to status", self.address
                 )
@@ -272,6 +295,7 @@ class CosoriKettleDevice:
             raise CosoriKettleError(f"Temperature must be {MIN_TEMP_C}-{MAX_TEMP_C}°C")
         async with self._transaction():
             self._staged_target_f = round(celsius_to_fahrenheit(temp_c))
+            self._staged_target_written = False
             if start is False:
                 await self.connect(COMMAND_CONNECT_TIMEOUT)
                 await self._stop_heating()
@@ -298,6 +322,9 @@ class CosoriKettleDevice:
         await asyncio.sleep(HELLO5_DELAY_S)
         self._notification_event.clear()
         await self._send_command(self._protocol.build_setpoint(round(target_f)))
+        # From here the kettle owns the request: a later status frame reporting a
+        # different setpoint proves the kettle did not accept it.
+        self._staged_target_written = True
         await asyncio.sleep(SETPOINT_GAP_DELAY_S)
         # The working implementation permits control after a short status wait.
         try:

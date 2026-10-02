@@ -28,6 +28,16 @@ MAX_TEMP_C = 100
 MODE_BOIL = 0x04  # 212°F / 100°C
 MODE_CUSTOM = 0x06  # Other temperatures
 
+# Frame opcodes (payload byte 1). Registration and status requests are safe to
+# replay on every reconnect; 0x41 control, 0xF0 setpoint, 0xF2 prepare and 0xF4
+# stop all command the heating element.
+OP_REGISTRATION = 0x81
+OP_POLL = 0x40
+HANDSHAKE_OPS = (OP_REGISTRATION, OP_POLL)
+
+# A custom handshake is one registration message, not an arbitrary script
+MAX_HANDSHAKE_BYTES = 256
+
 # Command pacing, matching the working C++ implementation
 HANDSHAKE_DELAY_S = 0.08
 HELLO5_DELAY_S = 0.06
