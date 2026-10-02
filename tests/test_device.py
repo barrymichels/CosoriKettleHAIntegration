@@ -12,6 +12,7 @@ from cosori_kettle_ble.exceptions import (
     CosoriKettleTimeoutError,
     CosoriKettleUnconfirmedError,
 )
+from test_protocol import COMPACT
 
 
 @pytest.fixture
@@ -28,7 +29,7 @@ async def device(ble_device, kettle_client):
 async def test_poll_accepts_immediate_fragmented_response(device, kettle_client):
     await device.update()
     assert device.current_temp_f == 92
-    assert device.target_temp_f == 212
+    assert device.reported_target_f == 212
     assert device.on_base is True
     assert kettle_client.writes[3].hex() == "a522010400b300404000"
 
@@ -37,23 +38,26 @@ async def test_start_stop_match_working_transactions(device, kettle_client):
     await device.update()
     kettle_client.writes.clear()
     assert await device.set_target_temperature(100) is False
-    assert kettle_client.writes == []
+    # A temperature-only request still polls fresh status before deciding.
+    assert [packet[6:10].hex() for packet in kettle_client.writes] == ["00404000"]
+    kettle_client.writes.clear()
     await device.start_heating()
-    assert [packet.hex() for packet in kettle_client.writes] == [
-        "a5220208007a00f2a3000001100e",
-        "a522030900a200f0a30004d401100e",
-        "a512190400aa00414000",
-        "a512040400bf00414000",
-        "a522050400af00404000",
+    assert [packet[6:10].hex() for packet in kettle_client.writes] == [
+        "00404000",  # fresh status before the start transaction
+        "00f2a300",
+        "00f0a300",
+        "00414000",
+        "00414000",
+        "00404000",  # verification poll
     ]
     assert device.heating is True
     kettle_client.writes.clear()
     await device.stop_heating()
-    assert [packet.hex() for packet in kettle_client.writes] == [
-        "a5220604009700f4a300",
-        "a512190400aa00414000",
-        "a5220704009600f4a300",
-        "a522080400ac00404000",
+    assert [packet[6:10].hex() for packet in kettle_client.writes] == [
+        "00f4a300",
+        "00414000",
+        "00f4a300",
+        "00404000",
     ]
     assert device.heating is False
 
@@ -69,12 +73,13 @@ async def test_poll_cannot_interleave_start_sequence(device, kettle_client):
     kettle_client.writes.clear()
     await asyncio.gather(device.start_heating(), device.update())
     assert [packet[6:10].hex() for packet in kettle_client.writes] == [
+        "00404000",  # start_heating's fresh-status poll
         "00f2a300",
         "00f0a300",
         "00414000",
         "00414000",
-        "00404000",
-        "00404000",
+        "00404000",  # start verification poll
+        "00404000",  # the queued update poll runs after the transaction
     ]
 
 
@@ -178,33 +183,37 @@ async def test_cancelled_subscription_releases_client(ble_device, kettle_client)
 async def test_reported_target_follows_the_kettle(device, kettle_client):
     """A setpoint changed on the kettle must not latch behind the first read."""
     await device.update()
-    assert device.target_temp_f == 212
+    assert device.reported_target_f == 212
+    assert device.requested_target_f == 212
 
     kettle_client.target = 185
     await device.update()
-    assert device.target_temp_f == 185
+    assert device.reported_target_f == 185
 
 
 async def test_staged_target_is_retired_once_confirmed(device, kettle_client):
     """Staging shows an unwritten target, but confirmation hands control back."""
     await device.update()
     assert await device.set_target_temperature(80) is False
-    assert device.target_temp_f == 176
+    assert device.requested_target_f == 176
+    assert device.reported_target_f == 212
     assert kettle_client.target == 212
 
     await device.start_heating()
     assert kettle_client.target == 176
-    assert device.target_temp_f == 176
+    assert device.pending_target_f is None
+    assert device.requested_target_f == 176
 
     kettle_client.target = 185
     await device.update()
-    assert device.target_temp_f == 185
+    assert device.reported_target_f == 185
 
 
 async def test_unconfirmed_command_reports_the_outcome(device, kettle_client):
     """A written command with no follow-up status must not be called a failure."""
     await device.update()
-    kettle_client.respond_poll = False
+    # The fresh-status poll is answered; the verification poll is not.
+    kettle_client.poll_responses_left = 1
     original = device._wait_status
 
     async def short_wait():
@@ -303,10 +312,11 @@ async def test_written_but_unconfirmed_target_is_superseded_by_the_kettle(
 ):
     """A setpoint the kettle never accepted must stop shadowing its reading."""
     await device.update()
-    assert device.target_temp_f == 212
+    assert device.requested_target_f == 212
 
     kettle_client.respond = False
-    kettle_client.respond_poll = False
+    # The fresh-status poll is answered; later polls are not.
+    kettle_client.poll_responses_left = 1
     original = device._wait_status
 
     async def short_wait():
@@ -324,18 +334,19 @@ async def test_written_but_unconfirmed_target_is_superseded_by_the_kettle(
         await device.update()
 
     assert recovered.target == 212
-    assert device.target_temp_f == 212
+    assert device.reported_target_f == 212
+    assert device.requested_target_f == 212
 
 
 async def test_unwritten_staged_target_survives_a_refused_start(device, kettle_client):
     """A start refused before any write keeps the staged target for later."""
     await device.update()
     assert await device.set_target_temperature(80) is False
-    assert device.target_temp_f == 176
+    assert device.requested_target_f == 176
 
     kettle_client.on_base = False
     await device.update()
-    assert device.target_temp_f == 176
+    assert device.requested_target_f == 176
     with pytest.raises(CosoriKettleError, match="on its base"):
         await device.start_heating()
     assert kettle_client.target == 212
@@ -344,7 +355,58 @@ async def test_unwritten_staged_target_survives_a_refused_start(device, kettle_c
     await device.update()
     await device.start_heating()
     assert kettle_client.target == 176
-    assert device.target_temp_f == 176
+    assert device.requested_target_f == 176
+
+
+async def test_temperature_only_request_after_manual_stop_does_not_start(
+    device, kettle_client
+):
+    """Cached heating must not start boiling after a stop at the kettle."""
+    await device.update()
+    await device.start_heating()
+    assert device.heating is True
+    kettle_client.heating = False  # someone pressed the kettle's own button
+    kettle_client.writes.clear()
+    assert await device.set_target_temperature(80) is False
+    assert [packet[6:10].hex() for packet in kettle_client.writes] == ["00404000"]
+    assert kettle_client.heating is False
+
+
+async def test_restart_after_stop_works(device, kettle_client):
+    """HELLO5 ends a prior stop, so a stopped kettle can heat again."""
+    await device.update()
+    await device.start_heating()
+    await device.stop_heating()
+    assert device.heating is False
+    await device.start_heating()
+    assert device.heating is True
+
+
+async def test_compact_notification_updates_heating_and_keeps_base(
+    device, kettle_client
+):
+    """Compact frames carry no base field, so cached base state persists."""
+    await device.update()
+    assert device.on_base is True
+    kettle_client.notify(None, COMPACT)
+    assert device.heating is True
+    assert device.current_temp_f == 100
+    assert device.on_base is True
+
+
+async def test_compact_followup_does_not_lose_fresh_base_status(device, kettle_client):
+    """An extended response followed by a compact one still satisfies the
+    base requirement for starting."""
+    await device.update()
+    original = kettle_client.status
+
+    def respond_with_extended_then_compact():
+        original()
+        kettle_client.notify(None, COMPACT)
+
+    kettle_client.status = respond_with_extended_then_compact
+    await device.start_heating()
+    assert device.heating is True
 
 
 async def test_connect_deadline_binds_regardless_of_the_connector(ble_device):

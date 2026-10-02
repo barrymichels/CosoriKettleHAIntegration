@@ -16,6 +16,7 @@ from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.temperature import display_temp
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import CosoriKettleConfigEntry, kettle_device_info
@@ -71,8 +72,20 @@ class CosoriKettleWaterHeater(
 
     @property
     def target_temperature(self) -> float | None:
-        """Return target temperature."""
-        return self.coordinator.target_temp_c
+        """Return the setpoint the kettle itself is armed to."""
+        return self.coordinator.reported_target_c
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Show a pending request so an off-state preset is not invisible."""
+        attributes: dict[str, Any] = {}
+        pending = self.coordinator.pending_target_c
+        if pending is not None:
+            # Render like core's temperature attribute, in the user's units.
+            attributes["requested_temperature"] = display_temp(
+                self.hass, pending, self.temperature_unit, self.precision
+            )
+        return attributes
 
     @property
     def current_operation(self) -> str:
@@ -81,9 +94,8 @@ class CosoriKettleWaterHeater(
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
         """Set target temperature."""
-        if (temperature := kwargs.get(ATTR_TEMPERATURE)) is None:
-            return
-
+        # Core's SET_TEMPERATURE_SCHEMA marks ATTR_TEMPERATURE required.
+        temperature = kwargs[ATTR_TEMPERATURE]
         _LOGGER.debug("Setting target temperature to %.1f°C", temperature)
         mode = kwargs.get(ATTR_OPERATION_MODE)
         if mode is not None and mode not in (self.operation_list or []):

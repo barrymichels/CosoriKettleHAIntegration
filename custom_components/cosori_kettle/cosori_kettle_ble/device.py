@@ -43,6 +43,7 @@ CONNECT_TIMEOUT = 30.0
 COMMAND_CONNECT_TIMEOUT = 10.0
 DISCONNECT_TIMEOUT = 5.0
 STATUS_TIMEOUT = 5.0
+DISCONNECT_LOCK_TIMEOUT = 5.0
 
 
 class CosoriKettleDevice:
@@ -67,6 +68,7 @@ class CosoriKettleDevice:
         self._reported_target_f: float | None = None
         self._ready = False
         self._notifications_received = 0
+        self._base_received = False
         self._notification_event = asyncio.Event()
         self._connection_lock = asyncio.Lock()
         self._operation_lock = asyncio.Lock()
@@ -96,15 +98,35 @@ class CosoriKettleDevice:
         return fahrenheit_to_celsius(temp) if temp is not None else None
 
     @property
-    def target_temp_f(self) -> float | None:
+    def reported_target_f(self) -> float | None:
+        """The setpoint the kettle itself reports being armed to."""
+        return self._reported_target_f
+
+    @property
+    def reported_target_c(self) -> float | None:
+        temp = self.reported_target_f
+        return fahrenheit_to_celsius(temp) if temp is not None else None
+
+    @property
+    def pending_target_f(self) -> int | None:
+        """A staged target the kettle has not confirmed or contradicted yet."""
+        return self._staged_target_f
+
+    @property
+    def pending_target_c(self) -> float | None:
+        temp = self._staged_target_f
+        return fahrenheit_to_celsius(temp) if temp is not None else None
+
+    @property
+    def requested_target_f(self) -> float | None:
         """Staged target until the kettle confirms or contradicts it."""
         if self._staged_target_f is not None:
             return float(self._staged_target_f)
         return self._reported_target_f
 
     @property
-    def target_temp_c(self) -> float | None:
-        temp = self.target_temp_f
+    def requested_target_c(self) -> float | None:
+        temp = self.requested_target_f
         return fahrenheit_to_celsius(temp) if temp is not None else None
 
     @property
@@ -137,6 +159,8 @@ class CosoriKettleDevice:
         )
         for status in statuses:
             self._status = status
+            if status.includes_base:
+                self._base_received = True
             _LOGGER.debug(
                 "Kettle %s: temperature=%s°F, setpoint=%s°F, on_base=%s, heating=%s",
                 self.address,
@@ -244,9 +268,25 @@ class CosoriKettleDevice:
                 _LOGGER.debug("Failed to disconnect %s", self.address, exc_info=True)
 
     async def disconnect(self) -> None:
-        """Wait for active transactions, then release the connection."""
-        async with self._operation_lock, self._connection_lock:
-            await self._disconnect()
+        """Wait briefly for active transactions, then release the connection."""
+        acquired = False
+        try:
+            async with asyncio.timeout(DISCONNECT_LOCK_TIMEOUT):
+                await self._operation_lock.acquire()
+            acquired = True
+        except TimeoutError:
+            # HA waits only seconds for unload tasks, so a longer command
+            # deadline must not keep the single BLE connection hostage.
+            _LOGGER.debug(
+                "Kettle %s: releasing connection past a busy transaction",
+                self.address,
+            )
+        try:
+            async with self._connection_lock:
+                await self._disconnect()
+        finally:
+            if acquired:
+                self._operation_lock.release()
 
     async def _send_command(self, data: bytes) -> None:
         if self._client is None or not self._client.is_connected:
@@ -274,18 +314,42 @@ class CosoriKettleDevice:
                 "Kettle disconnected while awaiting status"
             )
 
-    async def _poll(self) -> None:
+    async def _poll(self, require_base: bool = False) -> None:
         _LOGGER.debug("Kettle %s: requesting fresh status", self.address)
         self._notifications_received = 0
+        self._base_received = False
         self._notification_event.clear()
         await self._send_command(self._protocol.build_poll())
-        await self._wait_status()
+        while True:
+            await self._wait_status()
+            # A compact status carries no base field, so a base-dependent
+            # decision must see an extended frame during this poll. Track it
+            # on receipt: a later compact frame overwrites the latest status.
+            if not require_base or self._base_received:
+                return
+            self._notification_event.clear()
 
-    async def update(self, connect_timeout: float = CONNECT_TIMEOUT) -> None:
-        """Poll and require a fresh valid status; never accept stale data."""
+    async def update(
+        self,
+        connect_timeout: float = CONNECT_TIMEOUT,
+        poll_timeout: float | None = None,
+    ) -> None:
+        """Poll and require a fresh valid status; never accept stale data.
+
+        The deadline bounds the I/O inside the transaction, so waiting for
+        another transaction to finish cannot consume it.
+        """
         async with self._transaction():
-            await self.connect(connect_timeout)
-            await self._poll()
+            try:
+                async with asyncio.timeout(poll_timeout):
+                    await self.connect(connect_timeout)
+                    await self._poll()
+            except TimeoutError as err:
+                # The deadline cancelled mid-I/O, so the link state is unknown.
+                await self._disconnect()
+                raise CosoriKettleTimeoutError(
+                    f"Status transaction did not finish within {poll_timeout}s"
+                ) from err
 
     async def set_target_temperature(
         self, temp_c: float, *, start: bool | None = None
@@ -296,19 +360,22 @@ class CosoriKettleDevice:
         async with self._transaction():
             self._staged_target_f = round(celsius_to_fahrenheit(temp_c))
             self._staged_target_written = False
+            await self.connect(COMMAND_CONNECT_TIMEOUT)
             if start is False:
-                await self.connect(COMMAND_CONNECT_TIMEOUT)
                 await self._stop_heating()
                 return True
-            elif start is True or self.heating:
-                await self.connect(COMMAND_CONNECT_TIMEOUT)
+            # Fresh status must precede the decision: cached heating state can
+            # predate a manual stop at the kettle, and the base interlock needs
+            # a frame that actually carries the base field.
+            await self._poll(require_base=True)
+            if start is True or self.heating:
                 await self._start_heating()
                 return True
             return False
 
     async def _start_heating(self) -> None:
-        if self._status is None:
-            await self._poll()
+        if self._status is None or not self._status.includes_base:
+            await self._poll(require_base=True)
         if self.on_base is not True:
             raise CosoriKettleError("Place the kettle on its base before heating")
         target_f = (
@@ -343,6 +410,7 @@ class CosoriKettleDevice:
         """Start with the working HELLO5 / SETPOINT / echoed CTRL sequence."""
         async with self._transaction():
             await self.connect(COMMAND_CONNECT_TIMEOUT)
+            await self._poll(require_base=True)
             await self._start_heating()
 
     async def _stop_heating(self) -> None:

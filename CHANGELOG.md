@@ -2,6 +2,52 @@
 
 ## Unreleased
 
+- A temperature-only request now fetches a fresh extended status before
+  deciding whether to start heating. Cached heating state from before a
+  manual stop at the kettle previously made `set_target_temperature` replay
+  the start transaction — an unintended boil. The base interlock likewise
+  acts only on a frame that actually carries the base field, so a compact
+  status can no longer satisfy it with a cached value.
+- The water heater's `temperature` attribute now reports the setpoint the
+  kettle itself is armed to. A pending request is shown separately as the
+  `requested_temperature` attribute and on the diagnostic target sensor, so
+  a preset staged while off can no longer hide an externally changed
+  setpoint indefinitely.
+- The poll deadline now bounds the BLE I/O inside the device transaction,
+  so waiting for a control command to finish no longer times out the poll
+  and marks every entity unavailable on a healthy link. A timed-out
+  transaction still drops the wedged client.
+- Repeated poll failures back off through `UpdateFailed.retry_after`
+  (2 s, 4 s, … capped at 60 s) instead of retry-storming an absent kettle
+  every 2 seconds forever.
+- `build_ctrl(echo=True)` distinguishes "no status seen" from a legitimate
+  status sequence of zero, which a later non-status frame used to replace.
+- Test double: HELLO5 now ends a prior stop, so restart-after-stop is
+  testable; poll responses can be budgeted for unconfirmed-command tests; a
+  fresh subscription marks the mock client connected. New coverage: Bluetooth
+  discovery flows, compact frames through the device layer, the sequence-zero
+  sentinel, water-reading plausibility boundaries, and unload plus HA shutdown
+  with an active poll and an active command.
+
+- A fresh base status is tracked on receipt during a poll, so an extended
+  response immediately followed by a compact frame no longer loses the base
+  information and times out a start.
+
+- Unload and HA shutdown now cancel in-flight control commands and polls
+  instead of awaiting them: the production `COMMAND_TIMEOUT` (30 s) and
+  `POLL_TIMEOUT` (15 s) exceed Home Assistant's ~10 s wait for unload
+  tasks, which previously returned from unload with the BLE connection
+  still held — including when a poll's reconnect was wedged in
+  `start_notify()` and holding the device's connection lock.
+  `disconnect()` also bounds its wait for a busy transaction
+  (`DISCONNECT_LOCK_TIMEOUT`) as a backstop.
+
+- The water heater's `requested_temperature` attribute now renders in the
+  configured unit system, like core's `temperature` attribute, instead of
+  raw Celsius.
+- Packaging: the MIT license classifier was removed alongside PEP 639
+  `license = "MIT"`; setuptools 84 rejects the combination.
+
 - `CosoriKettleDevice.connect()` now enforces its own deadline.
   `establish_connection()` ignores a caller `timeout` (it applies its own 20 s
   per-attempt timeout and retries four times), so `CONNECT_TIMEOUT`,

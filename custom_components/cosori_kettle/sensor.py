@@ -41,7 +41,7 @@ SENSORS: tuple[CosoriKettleSensorEntityDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
         device_class=SensorDeviceClass.TEMPERATURE,
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
-        value_fn=lambda coordinator: coordinator.target_temp_c,
+        value_fn=lambda coordinator: coordinator.requested_target_c,
         entity_registry_enabled_default=False,
     ),
 )

@@ -57,7 +57,7 @@ For HACS installation, the updated code must first be pushed to a **public** Git
 
 Actual entity IDs depend on the device name and existing registry entries. Targets range from 40–100°C / 104–212°F, with integer Fahrenheit steps on the wire. Home Assistant displays and accepts water heater temperatures in its configured unit system. Check the entity ID and the water heater's `temperature_unit`, `temperature`, and `current_temperature` attributes under **Settings → Tools → States** before adapting examples. Temperature sensors can have separate display-unit overrides.
 
-Setting a temperature while off stages the target without starting heating, as in the ESPHome version. Turning on applies that target. Changing the target while heating applies it immediately. A staged target is what the entities show until the kettle answers: it confirms the setpoint, or — if the setpoint frame was written and the kettle settled on a different value — the request failed and the reported target follows the kettle again. A staged target that was never written stays pending, including across reconnects, so a refused start does not discard it. Include `operation_mode: "on"` to set a target and start in one action:
+Setting a temperature while off stages the target without starting heating, as in the ESPHome version. Turning on applies that target. Changing the target while heating applies it immediately. The water heater's `temperature` always shows the setpoint the kettle itself is armed to; a pending request appears separately as the `requested_temperature` attribute and on the diagnostic target sensor until the kettle confirms it or — if the setpoint frame was written and the kettle settled on a different value — the request failed and the reported target follows the kettle again. A staged target that was never written stays pending, including across reconnects, so a refused start does not discard it. Include `operation_mode: "on"` to set a target and start in one action:
 
 ```yaml
 action: water_heater.set_temperature
@@ -110,6 +110,9 @@ After installation, check these with your kettle:
 4. Removing an idle kettle from its base changes the base sensor to off; compact updates do not reset it to on.
 5. Power cycling the kettle or proxy results in unavailable entities, followed by recovery.
 6. Disabling/unloading the integration releases its BLE connection so another client can connect.
+7. Press the kettle's own stop button while it heats, then change the target temperature in Home Assistant: the kettle must not start heating again.
+8. The water heater card shows the setpoint the kettle is armed to; a preset staged while off appears separately as `requested_temperature` until the kettle confirms it.
+9. Capture compact status frames while the kettle is independently observed idle, heating, and stopped, and confirm the heating field agrees. The decoder matches the reference implementation, but that byte's meaning in compact frames has not been verified on hardware.
 
 ## Troubleshooting
 

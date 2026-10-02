@@ -6,7 +6,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
-from typing import NoReturn, TypeVar
+from typing import Any, NoReturn, TypeVar
 
 from bleak.backends.device import BLEDevice
 from homeassistant.components import bluetooth
@@ -78,6 +78,9 @@ class CosoriKettleDataUpdateCoordinator(DataUpdateCoordinator[None]):
             ble_device_callback=self._get_ble_device,
             handshake=handshake,
         )
+        self._consecutive_failures = 0
+        self._command_tasks: set[asyncio.Task[Any]] = set()
+        self._poll_tasks: set[asyncio.Task[None]] = set()
 
     @callback
     def _get_ble_device(self) -> BLEDevice:
@@ -95,19 +98,48 @@ class CosoriKettleDataUpdateCoordinator(DataUpdateCoordinator[None]):
             self.async_set_update_error(UpdateFailed("Kettle disconnected"))
 
     async def _async_update_data(self) -> None:
+        # The poll runs as a child task so shutdown can cancel a connection
+        # attempt wedged in start_notify without cancelling the task that
+        # hosts the refresh; connect() holds the connection lock throughout.
+        poll = asyncio.ensure_future(
+            self.device.update(POLL_CONNECT_TIMEOUT, POLL_TIMEOUT)
+        )
+        self._poll_tasks.add(poll)
+        poll.add_done_callback(self._poll_tasks.discard)
         try:
-            async with asyncio.timeout(POLL_TIMEOUT):
-                await self.device.update(POLL_CONNECT_TIMEOUT)
+            await asyncio.shield(poll)
+        except asyncio.CancelledError:
+            poll.cancel()
+            await asyncio.gather(poll, return_exceptions=True)
+            raise
         except TimeoutError as err:
-            raise UpdateFailed(
+            raise self._update_failed(
                 f"Status transaction did not finish within {POLL_TIMEOUT}s"
             ) from err
         except CosoriKettleError as err:
-            raise UpdateFailed(str(err)) from err
+            raise self._update_failed(str(err)) from err
+        self._consecutive_failures = 0
+
+    def _update_failed(self, message: str) -> UpdateFailed:
+        """Back off after repeated failures so an absent kettle is not
+        retried every few seconds forever."""
+        self._consecutive_failures += 1
+        err = UpdateFailed(message)
+        err.retry_after = min(60, 2 * self._consecutive_failures)
+        return err
 
     async def async_shutdown(self) -> None:
-        """Cancel HA refresh work before releasing the BLE connection."""
+        """Cancel in-flight HA work before releasing the BLE connection."""
         await super().async_shutdown()
+        # Production COMMAND_TIMEOUT (30 s) and POLL_TIMEOUT (15 s) exceed
+        # HA's ~10 s wait for unload tasks, and a poll reconnecting inside
+        # connect() holds the device's connection lock, so in-flight polls
+        # and commands are cancelled rather than awaited.
+        pending = self._command_tasks | self._poll_tasks
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         await self.device.disconnect()
 
     @property
@@ -115,8 +147,16 @@ class CosoriKettleDataUpdateCoordinator(DataUpdateCoordinator[None]):
         return self.device.current_temp_c
 
     @property
-    def target_temp_c(self) -> float | None:
-        return self.device.target_temp_c
+    def reported_target_c(self) -> float | None:
+        return self.device.reported_target_c
+
+    @property
+    def requested_target_c(self) -> float | None:
+        return self.device.requested_target_c
+
+    @property
+    def pending_target_c(self) -> float | None:
+        return self.device.pending_target_c
 
     @property
     def on_base(self) -> bool | None:
@@ -129,11 +169,25 @@ class CosoriKettleDataUpdateCoordinator(DataUpdateCoordinator[None]):
     async def _async_command(
         self, name: str, run: Callable[[], Awaitable[_CommandT]]
     ) -> _CommandT:
-        """Run one control transaction under a strict deadline."""
+        """Run one control transaction under a strict deadline.
+
+        The transaction runs as a child task so shutdown can cancel it
+        without touching the host task: production COMMAND_TIMEOUT (30 s)
+        exceeds Home Assistant's ~10 s wait for unload tasks.
+        """
+        command = asyncio.ensure_future(run())
+        self._command_tasks.add(command)
+        command.add_done_callback(self._command_tasks.discard)
         try:
             async with asyncio.timeout(COMMAND_TIMEOUT):
-                return await run()
+                return await asyncio.shield(command)
+        except asyncio.CancelledError:
+            command.cancel()
+            await asyncio.gather(command, return_exceptions=True)
+            raise
         except TimeoutError:
+            command.cancel()
+            await asyncio.gather(command, return_exceptions=True)
             self._raise_command_error(
                 CosoriKettleUnconfirmedError(
                     f"{name} did not finish within {COMMAND_TIMEOUT}s, so its "

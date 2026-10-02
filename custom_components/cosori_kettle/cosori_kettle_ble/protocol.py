@@ -27,6 +27,7 @@ class KettleStatus(NamedTuple):
     target_temp_f: float | None
     on_base: bool | None
     heating: bool
+    includes_base: bool
 
 
 class CosoriProtocol:
@@ -35,7 +36,7 @@ class CosoriProtocol:
     def __init__(self) -> None:
         self._tx_seq = 0
         self._last_rx_seq = 0
-        self._last_status_seq = 0
+        self._last_status_seq: int | None = None
         self._on_base: bool | None = None
         self._buffer = bytearray()
 
@@ -96,7 +97,14 @@ class CosoriProtocol:
 
     def build_ctrl(self, *, echo: bool = True) -> bytes:
         """Control uses the same payload for start and stop; F4 selects stop."""
-        seq = (self._last_status_seq or self._last_rx_seq) if echo else None
+        # A status sequence of zero is legitimate, so "no status seen" needs an
+        # explicit None sentinel instead of a falsy check.
+        if not echo:
+            seq = None
+        elif self._last_status_seq is not None:
+            seq = self._last_status_seq
+        else:
+            seq = self._last_rx_seq
         return self._build_packet(FRAME_TYPE_EXTENDED, bytes.fromhex("00414000"), seq)
 
     def feed(self, data: bytes | bytearray) -> list[KettleStatus]:
@@ -157,10 +165,13 @@ class CosoriProtocol:
             if MIN_SETPOINT_F <= payload[6] <= MAX_SETPOINT_F
             else None
         )
-        if data[1] == FRAME_TYPE_EXTENDED and len(payload) >= 15:
+        includes_base = data[1] == FRAME_TYPE_EXTENDED and len(payload) >= 15
+        if includes_base:
             self._on_base = payload[14] == 0
         self._last_status_seq = data[2]
-        return KettleStatus(float(payload[7]), target_temp_f, self._on_base, heating)
+        return KettleStatus(
+            float(payload[7]), target_temp_f, self._on_base, heating, includes_base
+        )
 
 
 def validate_registration_packets(packets: Sequence[bytes]) -> None:

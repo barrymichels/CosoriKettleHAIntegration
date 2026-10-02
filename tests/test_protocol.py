@@ -151,3 +151,33 @@ def test_handshake_of_the_wrong_kind_is_a_value_error(values):
     """A corrupted entry must fail as a validation error, never a crash."""
     with pytest.raises(ValueError, match="sequence of hexadecimal strings"):
         parse_registration_handshake(values)
+
+
+def test_status_sequence_zero_is_not_treated_as_no_status():
+    """A legitimate status sequence of zero must survive later rx frames."""
+    protocol = CosoriProtocol()
+    zero_seq = bytearray(ON_BASE)
+    zero_seq[2] = 0
+    zero_seq[5] = CosoriProtocol._calculate_checksum(bytes(zero_seq[:5] + zero_seq[6:]))
+    protocol.parse_status(bytes(zero_seq))
+    protocol.parse_status(bytes.fromhex("a5225e04005600404000"))
+    assert protocol.build_ctrl()[2] == 0
+
+
+@pytest.mark.parametrize(
+    ("reading", "accepted"), [(39, False), (40, True), (230, True), (231, False)]
+)
+def test_water_reading_plausibility_boundaries(reading, accepted):
+    """Corrupt-frame rejection must apply exactly outside 40-230F."""
+    packet = bytearray(ON_BASE)
+    packet[13] = reading
+    packet[5] = CosoriProtocol._calculate_checksum(bytes(packet[:5] + packet[6:]))
+    status = CosoriProtocol().parse_status(bytes(packet))
+    assert (status is not None) is accepted
+
+
+def test_only_extended_frames_carry_base_information():
+    protocol = CosoriProtocol()
+    assert protocol.parse_status(ON_BASE).includes_base is True
+    protocol.parse_status(OFF_BASE)
+    assert protocol.parse_status(COMPACT).includes_base is False

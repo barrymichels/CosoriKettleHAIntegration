@@ -78,7 +78,8 @@ async def test_entities_and_service_controls(hass, entry, kettle_client):
         },
         blocking=True,
     )
-    assert kettle_client.writes == []
+    # A temperature-only request still polls fresh status before deciding.
+    assert [packet[6:10].hex() for packet in kettle_client.writes] == ["00404000"]
     await hass.services.async_call(
         "water_heater",
         "set_operation_mode",
@@ -103,7 +104,10 @@ async def test_entities_and_service_controls(hass, entry, kettle_client):
         blocking=True,
     )
     assert kettle_client.heating is False
-    assert entry.runtime_data.target_temp_c == pytest.approx(90)
+    assert entry.runtime_data.requested_target_c == pytest.approx(90)
+    heater_state = hass.states.get(heater.entity_id)
+    assert heater_state.attributes["temperature"] == pytest.approx(80)
+    assert heater_state.attributes["requested_temperature"] == pytest.approx(90)
 
 
 async def test_disconnect_staged_target_and_unload(hass, entry, kettle_client):
@@ -124,7 +128,7 @@ async def test_disconnect_staged_target_and_unload(hass, entry, kettle_client):
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
     assert coordinator._shutdown_requested is True
-    kettle_client.disconnect.assert_awaited_once()
+    assert kettle_client.disconnect.await_count >= 1
 
 
 async def test_status_poll_publishes_entities_and_recovers_availability(
@@ -306,6 +310,155 @@ async def test_ha_shutdown_releases_connection(hass, entry, kettle_client):
     kettle_client.disconnect.assert_awaited_once()
 
 
+async def test_unload_cancels_active_poll_and_releases_ble(hass, entry, kettle_client):
+    """Core cancels entry-tracked refreshes on unload; BLE must still be freed."""
+    coordinator = entry.runtime_data
+    original = kettle_client.write_gatt_char
+
+    async def hanging_poll_write(characteristic, packet, response):
+        if packet[6:10] == bytes.fromhex("00404000"):
+            await asyncio.Future()
+        await original(characteristic, packet, response)
+
+    kettle_client.write_gatt_char = hanging_poll_write
+    entry.async_create_background_task(
+        hass, coordinator.async_refresh(), "test active refresh"
+    )
+    await asyncio.sleep(0.05)
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert coordinator._shutdown_requested is True
+    assert kettle_client.disconnect.await_count >= 1
+    assert coordinator.device.is_connected is False
+
+
+async def test_unload_cancels_active_command_and_releases_ble(
+    hass, entry, kettle_client
+):
+    """Production COMMAND_TIMEOUT (30 s) exceeds HA's ~10 s unload wait.
+
+    Unload must cancel the command and free BLE within its own budget
+    instead of timing out with the connection still held.
+    """
+    coordinator = entry.runtime_data
+    original = kettle_client.write_gatt_char
+
+    async def hanging_control_write(characteristic, packet, response):
+        if packet[6:10] == bytes.fromhex("00f0a300"):
+            await asyncio.Future()
+        await original(characteristic, packet, response)
+
+    kettle_client.write_gatt_char = hanging_control_write
+    command = asyncio.create_task(coordinator.async_start_heating())
+    await asyncio.sleep(0.05)
+    async with asyncio.timeout(5):
+        assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert command.cancelled()
+    assert kettle_client.disconnect.await_count >= 1
+    assert coordinator.device.is_connected is False
+
+
+async def test_ha_shutdown_during_active_poll_releases_ble(hass, entry, kettle_client):
+    """A poll in flight at HA stop must not wedge the shutdown listener."""
+    coordinator = entry.runtime_data
+    original = kettle_client.write_gatt_char
+
+    async def hanging_poll_write(characteristic, packet, response):
+        if packet[6:10] == bytes.fromhex("00404000"):
+            await asyncio.Future()
+        await original(characteristic, packet, response)
+
+    kettle_client.write_gatt_char = hanging_poll_write
+    refresh = asyncio.create_task(coordinator.async_refresh())
+    await asyncio.sleep(0.05)
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_STOP)
+    await hass.async_block_till_done()
+    assert coordinator._shutdown_requested is True
+    assert kettle_client.disconnect.await_count >= 1
+    assert coordinator.device.is_connected is False
+    await asyncio.gather(refresh, return_exceptions=True)
+
+
+async def test_ha_shutdown_during_subscription_releases_ble(hass, entry, kettle_client):
+    """A reconnect wedged in start_notify holds the connection lock.
+
+    Shutdown must cancel the poll instead of waiting for its deadline:
+    with a 20 ms disconnect-lock budget and a 350 ms poll deadline, the
+    old code held BLE connected for the full 350 ms.
+    """
+    coordinator = entry.runtime_data
+    started = asyncio.Event()
+
+    async def hanging_subscription(*args, **kwargs):
+        started.set()
+        await asyncio.Future()
+
+    kettle_client.start_notify.side_effect = hanging_subscription
+    coordinator.device._handle_disconnect(coordinator.device._client)
+    with (
+        patch(
+            "custom_components.cosori_kettle.cosori_kettle_ble.device"
+            ".DISCONNECT_LOCK_TIMEOUT",
+            0.02,
+        ),
+        patch("custom_components.cosori_kettle.coordinator.POLL_TIMEOUT", 0.35),
+    ):
+        refresh = asyncio.create_task(coordinator.async_refresh())
+        await started.wait()
+        hass.bus.async_fire(EVENT_HOMEASSISTANT_STOP)
+        # Well under the 350 ms poll deadline: shutdown cancels the poll.
+        await asyncio.wait_for(hass.async_block_till_done(), 0.15)
+    assert coordinator._shutdown_requested is True
+    assert kettle_client.disconnect.await_count >= 1
+    assert coordinator.device.is_connected is False
+    await asyncio.gather(refresh, return_exceptions=True)
+
+
+async def test_ha_shutdown_during_active_command_releases_ble(
+    hass, entry, kettle_client
+):
+    """A command in flight at HA stop is cancelled; BLE is released."""
+    coordinator = entry.runtime_data
+    original = kettle_client.write_gatt_char
+
+    async def hanging_control_write(characteristic, packet, response):
+        if packet[6:10] == bytes.fromhex("00f0a300"):
+            await asyncio.Future()
+        await original(characteristic, packet, response)
+
+    kettle_client.write_gatt_char = hanging_control_write
+    command = asyncio.create_task(coordinator.async_start_heating())
+    await asyncio.sleep(0.05)
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_STOP)
+    await hass.async_block_till_done()
+    assert command.cancelled()
+    assert kettle_client.disconnect.await_count >= 1
+    assert coordinator.device.is_connected is False
+
+
+async def test_repeated_poll_failures_back_off(hass, entry):
+    """Consecutive failures grow retry_after; success resets the cadence."""
+    from homeassistant.helpers.update_coordinator import UpdateFailed
+
+    coordinator = entry.runtime_data
+    with patch.object(
+        coordinator.device, "update", side_effect=CosoriKettleTimeoutError("gone")
+    ):
+        for expected in (2, 4, 6):
+            with pytest.raises(UpdateFailed) as raised:
+                await coordinator._async_update_data()
+            assert raised.value.retry_after == expected
+    with patch.object(coordinator.device, "update"):
+        await coordinator._async_update_data()
+    with patch.object(
+        coordinator.device, "update", side_effect=CosoriKettleTimeoutError("gone")
+    ):
+        with pytest.raises(UpdateFailed) as raised:
+            await coordinator._async_update_data()
+    assert raised.value.retry_after == 2
+
+
 async def test_reconnect_resolves_new_proxy_route(
     hass, entry, kettle_client, ble_device
 ):
@@ -436,6 +589,23 @@ async def test_water_heater_target_follows_kettle_setpoint(hass, entry, kettle_c
     assert hass.states.get("water_heater.cosori_kettle").attributes[
         "temperature"
     ] == pytest.approx(85, abs=0.5)
+
+
+async def test_requested_temperature_follows_display_units(hass, entry, kettle_client):
+    """The pending attribute renders in the configured unit system."""
+    from homeassistant.util import unit_system
+
+    hass.config.units = unit_system.IMPERIAL_SYSTEM
+    await hass.services.async_call(
+        "water_heater",
+        "set_temperature",
+        {"entity_id": "water_heater.cosori_kettle", "temperature": 176},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+    heater = hass.states.get("water_heater.cosori_kettle")
+    assert heater.attributes["temperature"] == pytest.approx(212)
+    assert heater.attributes["requested_temperature"] == pytest.approx(176)
 
 
 async def test_poll_deadline_fails_and_recovers(hass, entry):
@@ -664,6 +834,83 @@ async def test_invalid_stored_handshake_fails_setup_cleanly(
     assert entry.state is ConfigEntryState.SETUP_ERROR
     assert connect.await_count == 0
     assert "handshake" in caplog.text
+
+
+def _discovery_info(ble_device, connectable=True):
+    from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
+
+    return BluetoothServiceInfoBleak(
+        name="Cosori Kettle",
+        address=ble_device.address,
+        rssi=-60,
+        manufacturer_data={},
+        service_data={},
+        service_uuids=[SERVICE_UUID],
+        source="local",
+        device=ble_device,
+        advertisement=None,
+        connectable=connectable,
+        time=0.0,
+        tx_power=None,
+    )
+
+
+async def test_bluetooth_discovery_confirm_creates_entry(
+    hass, ble_device, kettle_client
+):
+    """The advertised path: discovery, confirm form, validated entry."""
+    with (
+        patch(
+            "homeassistant.components.bluetooth.async_ble_device_from_address",
+            return_value=ble_device,
+        ),
+        patch(
+            f"{BLE_MODULE}.establish_connection", AsyncMock(return_value=kettle_client)
+        ),
+        patch(
+            "custom_components.cosori_kettle.async_setup_entry",
+            AsyncMock(return_value=True),
+        ),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": "bluetooth"},
+            data=_discovery_info(ble_device),
+        )
+        assert result["type"] is FlowResultType.FORM
+        assert result["step_id"] == "bluetooth_confirm"
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={}
+        )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"] == {CONF_ADDRESS: ble_device.address}
+    assert result["context"]["unique_id"] == ble_device.address
+    kettle_client.disconnect.assert_awaited_once()
+    assert kettle_client.heating is False
+
+
+async def test_bluetooth_discovery_aborts(hass, ble_device):
+    """Non-connectable devices and already-configured kettles abort."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": "bluetooth"},
+        data=_discovery_info(ble_device, connectable=False),
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "not_supported"
+
+    MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=ble_device.address,
+        data={CONF_ADDRESS: ble_device.address},
+    ).add_to_hass(hass)
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": "bluetooth"},
+        data=_discovery_info(ble_device),
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
 
 
 async def _configure_manual_flow(hass, ble_device, user_input, connect):
