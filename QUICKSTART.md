@@ -6,7 +6,7 @@ Requires Home Assistant 2026.9 or newer and a connectable Bluetooth adapter or a
 2. Disable the old kettle BLE connection and close the VeSync app. The kettle accepts one connection at a time.
 3. If using the old ESP32 as a proxy, configure `bluetooth_proxy: {active: true}` with `esp32_ble_tracker:` and remove its kettle client/component and dependent entities. After flashing, connect it under **Settings → Devices & services → ESPHome** and verify it appears in Bluetooth. Device Builder or the proxy's web page showing it online is insufficient.
 4. Copy `custom_components/cosori_kettle/` from this repository into `/config/custom_components/`. The resulting path must be `/config/custom_components/cosori_kettle/manifest.json`.
-5. Restart Home Assistant **after copying the folder**, refresh the browser, then add **Cosori Kettle** in **Settings → Devices & services → Add integration**. Select a discovered device or enter the MAC. Advanced setup options accept the three custom handshake packets if needed.
+5. Restart Home Assistant **after copying the folder**, refresh the browser, then add **Cosori Kettle** in **Settings → Devices & services → Add integration**. Select a discovered device or enter the MAC. The form always shows three optional "Custom handshake packet" fields; leave them blank unless you captured custom handshake packets from a working ESPHome configuration.
 
 Setup reads status without heating. Set a target and start using:
 

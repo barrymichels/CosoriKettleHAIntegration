@@ -145,6 +145,7 @@ class CosoriKettleDevice:
             return
         self._ready = False
         self._status = None
+        self._reported_target_f = None
         self._notification_event.set()
         if self._disconnect_callback:
             self._disconnect_callback(self._device)
@@ -382,7 +383,12 @@ class CosoriKettleDevice:
     async def set_target_temperature(
         self, temp_c: float, *, start: bool | None = None
     ) -> bool:
-        """Stage/apply a target and return whether fresh status was received."""
+        """Stage/apply a target; True if a start/stop transaction ran.
+
+        False means the target was only staged for the next start because the
+        kettle was idle. Both outcomes end with fresh status from the kettle;
+        communication failures raise instead of returning False.
+        """
         if not MIN_TEMP_C <= temp_c <= MAX_TEMP_C:
             raise CosoriKettleError(f"Temperature must be {MIN_TEMP_C}-{MAX_TEMP_C}°C")
         async with self._transaction():

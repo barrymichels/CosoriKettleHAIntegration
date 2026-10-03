@@ -199,14 +199,14 @@ class CosoriKettleDataUpdateCoordinator(DataUpdateCoordinator[None]):
     async def async_set_temperature(
         self, temperature: float, *, start: bool | None = None
     ) -> None:
-        refreshed = await self._async_command(
+        await self._async_command(
             "Set target temperature",
             lambda: self.device.set_target_temperature(temperature, start=start),
         )
-        if refreshed:
-            self.async_set_updated_data(None)
-        else:
-            self.async_update_listeners()
+        # Every successful transaction ends with fresh kettle status, so
+        # publish it like the start/stop commands do: this restores entity
+        # availability and re-arms the normal refresh cadence after a failure.
+        self.async_set_updated_data(None)
 
     def _raise_command_error(self, err: CosoriKettleError) -> NoReturn:
         if isinstance(

@@ -209,6 +209,21 @@ async def test_staged_target_is_retired_once_confirmed(device, kettle_client):
     assert device.reported_target_f == 185
 
 
+async def test_spontaneous_disconnect_clears_reported_target_only(
+    device, kettle_client
+):
+    await device.update()
+    assert device.reported_target_f == 212
+    assert await device.set_target_temperature(80) is False
+    assert device.pending_target_f == 176
+
+    device._handle_disconnect(device._client)
+
+    assert device.reported_target_f is None
+    assert device.pending_target_f == 176
+    assert device.requested_target_f == 176
+
+
 async def test_unconfirmed_command_reports_the_outcome(device, kettle_client):
     """A written command with no follow-up status must not be called a failure."""
     await device.update()

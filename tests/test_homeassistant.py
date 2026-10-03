@@ -119,11 +119,11 @@ async def test_disconnect_staged_target_and_unload(hass, entry, kettle_client):
         == STATE_UNAVAILABLE
     )
     await coordinator.async_set_temperature(80)
-    assert coordinator.last_update_success is False
+    assert coordinator.last_update_success is True
     await hass.async_block_till_done()
     assert (
         hass.states.get("sensor.cosori_kettle_current_temperature").state
-        == STATE_UNAVAILABLE
+        != STATE_UNAVAILABLE
     )
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
@@ -477,6 +477,66 @@ async def test_successful_command_resets_failure_backoff(hass, entry, kettle_cli
         with pytest.raises(UpdateFailed) as raised:
             await coordinator._async_update_data()
         assert raised.value.retry_after == 2
+
+
+async def test_temperature_only_request_recovers_availability_and_backoff(
+    hass, entry, kettle_client
+):
+    """A staged target after failed polls restores availability and cadence.
+
+    HA filters service calls to unavailable entities, so the regression
+    drives the completed coordinator refresh and the command seam directly.
+    """
+    from datetime import timedelta
+
+    from homeassistant.helpers.update_coordinator import UpdateFailed
+    from homeassistant.util import dt as dt_util
+    from pytest_homeassistant_custom_component.common import async_fire_time_changed
+
+    coordinator = entry.runtime_data
+    # Two completed refresh failures grow the backoff past the 2 s interval
+    # and leave core's finally-block backoff timer installed.
+    with patch.object(
+        coordinator.device, "update", side_effect=CosoriKettleTimeoutError("gone")
+    ):
+        for expected in (2, 4):
+            await coordinator.async_refresh()
+            assert isinstance(coordinator.last_exception, UpdateFailed)
+            assert coordinator.last_exception.retry_after == expected
+    await hass.async_block_till_done()
+    assert coordinator.last_update_success is False
+    assert (
+        hass.states.get("sensor.cosori_kettle_current_temperature").state
+        == STATE_UNAVAILABLE
+    )
+
+    # Real device seam: staging polls fresh status without heating.
+    await coordinator.async_set_temperature(80)
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is True
+    assert (
+        hass.states.get("sensor.cosori_kettle_current_temperature").state
+        != STATE_UNAVAILABLE
+    )
+    assert hass.states.get("water_heater.cosori_kettle").attributes[
+        "requested_temperature"
+    ] == pytest.approx(80)
+    assert kettle_client.target == 212  # staged only; physical setpoint untouched
+
+    # Cadence: the next poll fires at the 2 s interval, not the 4 s backoff.
+    kettle_client.writes.clear()
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=2))
+    await hass.async_block_till_done()
+    assert [packet[6:10].hex() for packet in kettle_client.writes] == ["00404000"]
+
+    # After recovery the next failure restarts the backoff at 2 s.
+    with patch.object(
+        coordinator.device, "update", side_effect=CosoriKettleTimeoutError("gone")
+    ):
+        await coordinator.async_refresh()
+    assert isinstance(coordinator.last_exception, UpdateFailed)
+    assert coordinator.last_exception.retry_after == 2
 
 
 async def test_reconnect_resolves_new_proxy_route(

@@ -1,6 +1,14 @@
 # Changelog
 
 ## Unreleased
+- Temperature-only target requests now publish the fresh status they already
+  fetched, so a recovered kettle immediately becomes available again and
+  poll backoff returns to the normal cadence. An idle kettle is only staged,
+  with no heat command; a kettle already heating still runs its heat
+  transaction.
+- Spontaneous BLE disconnects now clear the cached reported target like
+  explicit disconnects while preserving an unwritten staged target for a later
+  reconnect.
 - Config flow setup now bounds the whole probe (`PROBE_TIMEOUT`, 60 s): a
   wedged adapter or proxy stuck in `start_notify` or the handshake writes
   previously could hang the setup dialog past every internal deadline. A
