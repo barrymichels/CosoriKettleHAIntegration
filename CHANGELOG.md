@@ -1,6 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.3.1
+
+Bug-fix release for the Home Assistant integration and the bundled
+`cosori_kettle_ble` library. No config-entry or entity migration is needed:
+entity names and IDs are unchanged. In the library, the
+`CosoriKettleDevice.target_temp_f` / `target_temp_c` properties are replaced
+by `reported_target_*`, `pending_target_*`, and `requested_target_*`, and
+`parse_registration_handshake` / `validate_registration_packets` are now
+exported. The integration's `manifest.json`, `pyproject.toml`, and the
+library's `__version__` all report 0.3.1; a test asserts they stay equal.
+
 - Temperature-only target requests now publish the fresh status they already
   fetched, so a recovered kettle immediately becomes available again and
   poll backoff returns to the normal cadence. An idle kettle is only staged,

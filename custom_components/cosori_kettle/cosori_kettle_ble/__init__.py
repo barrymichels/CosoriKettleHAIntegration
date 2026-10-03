@@ -9,7 +9,7 @@ from .exceptions import (
 )
 from .protocol import parse_registration_handshake, validate_registration_packets
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 __all__ = [
     "CosoriKettleDevice",
     "CosoriKettleError",
