@@ -48,6 +48,38 @@ def test_compact_preserves_off_base():
     assert status.on_base is False
 
 
+def _frame(frame_type: int, payload: bytes) -> bytes:
+    """Build a status frame with a valid checksum (the frame sums to 0xFF)."""
+    header = bytes([0xA5, frame_type, 0x10, len(payload), 0])
+    return header + bytes([(0xFF - sum(header + payload)) & 0xFF]) + payload
+
+
+@pytest.mark.parametrize(
+    ("stage", "byte8", "heating"),
+    [
+        (0, 0x01, False),  # idle with a hold armed: byte 8 is not heating
+        (1, 0x00, True),  # heating with no hold armed
+        (2, 0x00, True),  # almost done
+        (3, 0x01, True),  # holding
+        (5, 0x01, False),  # delayed start scheduled
+    ],
+)
+def test_compact_heating_follows_stage_byte(stage, byte8, heating):
+    payload = bytes([0x01, 0x41, 0x40, 0x00, stage, 0x04, 0xD4, 0x64, byte8, 0, 0, 0])
+    status = CosoriProtocol().parse_status(_frame(0x22, payload))
+    assert status is not None
+    assert status.heating is heating
+
+
+@pytest.mark.parametrize(("stage", "heating"), [(0, False), (1, True), (3, True), (5, False)])
+def test_extended_heating_follows_stage_byte(stage, heating):
+    payload = bytearray(ON_BASE[6:])
+    payload[4] = stage
+    status = CosoriProtocol().parse_status(_frame(0x12, bytes(payload)))
+    assert status is not None
+    assert status.heating is heating
+
+
 def test_fragmentation_and_multiple_frames():
     protocol = CosoriProtocol()
     assert protocol.feed(b"noise" + ON_BASE[:20]) == []

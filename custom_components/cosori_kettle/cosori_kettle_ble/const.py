@@ -24,6 +24,12 @@ MAX_VALID_READING_F = 230
 MIN_TEMP_C = 40
 MAX_TEMP_C = 100
 
+# Status stage byte (payload[4] in both status frames): 0 idle, 1 heating,
+# 2 almost done, 3 holding, 5 delayed start scheduled. Only 1-3 heat water.
+# Compact payload[8] is not a heating flag: it is 01 while a hold or schedule
+# is armed (homebridge-cosori-kettle-ble PROTOCOL.md, captured on R0007V0012).
+HEATING_STAGES = (1, 2, 3)
+
 # Setpoint modes
 MODE_BOIL = 0x04  # 212°F / 100°C
 MODE_CUSTOM = 0x06  # Other temperatures

@@ -9,6 +9,7 @@ from .const import (
     FRAME_TYPE_COMPACT,
     FRAME_TYPE_EXTENDED,
     HANDSHAKE_OPS,
+    HEATING_STAGES,
     MAX_HANDSHAKE_BYTES,
     MAX_SETPOINT_F,
     MAX_VALID_READING_F,
@@ -149,13 +150,12 @@ class CosoriProtocol:
         if data[1] == FRAME_TYPE_COMPACT:
             if len(payload) < 9 or payload[:2] != b"\x01\x41":
                 return None
-            heating = payload[8] != 0
         elif data[1] == FRAME_TYPE_EXTENDED:
             if len(payload) < 8 or payload[:2] != b"\x01\x40":
                 return None
-            heating = payload[4] != 0
         else:
             return None
+        heating = payload[4] in HEATING_STAGES
         if not MIN_VALID_READING_F <= payload[7] <= MAX_VALID_READING_F:
             return None
         # A setpoint outside the range the kettle accepts cannot be commanded,
